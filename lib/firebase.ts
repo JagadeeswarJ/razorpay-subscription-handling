@@ -19,31 +19,30 @@ if (getApps().length === 0) {
 
 export const db = getFirestore(app);
 
-export interface UserTier {
+export interface TierEntity {
+  entityType: "Tier";
   userId: string;
-  tier: 'BASIC' | 'PRO';
-  subscriptionId: string;
-  status: 'ACTIVE' | 'CANCELLED' | 'EXPIRED';
-  renewalPeriod: 'MONTHLY';
-  amount: number;
-  planId: string;
-  createdAt: Timestamp;
-  updatedAt: Timestamp;
-  nextBillingDate?: Timestamp;
-  paymentId?: string;
-  paymentSignature?: string;
-  // For pending downgrades
-  pendingPlanChange?: string | null;
-  pendingTier?: 'BASIC' | 'PRO' | null;
-  pendingAmount?: number | null;
+  tier: "NONE" | "BASIC" | "PRO" | "TRIAL";
+  billing?: {
+    renewalPeriod: "MONTHLY" | "ANNUAL" | null;
+    trialStartDate: string | null;
+    trialEndDate: string | null;
+    subscriptionStartDate: string | null;
+    subscriptionEndDate: string | null;
+    razorpaySubscriptionId?: string;
+    razorpayCustomerId?: string;
+    isConfirmationSent?: boolean;
+  };
+  createdAt: string; // UTC ISO
+  updatedAt: string; // UTC ISO
 }
 
-export const createUserTier = async (data: Omit<UserTier, 'createdAt' | 'updatedAt'>) => {
-  const now = new Date();
-  const tierData: UserTier = {
+export const createUserTier = async (data: Omit<TierEntity, 'createdAt' | 'updatedAt'>) => {
+  const now = new Date().toISOString();
+  const tierData: TierEntity = {
     ...data,
-    createdAt: Timestamp.fromDate(now),
-    updatedAt: Timestamp.fromDate(now),
+    createdAt: now,
+    updatedAt: now,
   };
 
   const docRef = await db.collection('tier').add(tierData);
@@ -53,16 +52,15 @@ export const createUserTier = async (data: Omit<UserTier, 'createdAt' | 'updated
 
 export const updateUserTier = async (
   userId: string, 
-  subscriptionId: string,
-  updates: Partial<UserTier> | Record<string, any>
+  updates: Partial<TierEntity> | Record<string, any>
 ) => {
-  const now = new Date();
+  const now = new Date().toISOString();
   const updatedData = {
     ...updates,
-    updatedAt: Timestamp.fromDate(now),
+    updatedAt: now,
   };
 
-  // First get all user documents, then filter in memory
+  // Get user tier document (should be only one per user)
   const querySnapshot = await db.collection('tier')
     .where('userId', '==', userId)
     .get();
@@ -72,22 +70,13 @@ export const updateUserTier = async (
     return null;
   }
 
-  // Find the document with matching subscriptionId in memory
-  const matchingDoc = querySnapshot.docs.find(doc => doc.data().subscriptionId === subscriptionId);
-  
-  if (!matchingDoc) {
-    console.error('No user tier found for subscriptionId:', subscriptionId);
-    return null;
-  }
-
-  const docId = matchingDoc.id;
+  const docId = querySnapshot.docs[0].id;
   await db.collection('tier').doc(docId).update(updatedData);
   console.log('User tier updated for docId:', docId);
   return docId;
 };
 
 export const getUserTier = async (userId: string) => {
-  // First get all user subscriptions
   const querySnapshot = await db.collection('tier')
     .where('userId', '==', userId)
     .get();
@@ -96,25 +85,11 @@ export const getUserTier = async (userId: string) => {
     return null;
   }
 
-  // Filter and sort in memory to avoid composite index requirement
-  const userTiers = querySnapshot.docs
-    .map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    }))
-    .filter((tier: any) => ['ACTIVE', 'CANCELLED'].includes(tier.status))
-    .sort((a: any, b: any) => {
-      // Sort by createdAt descending (most recent first)
-      const aTime = a.createdAt._seconds || 0;
-      const bTime = b.createdAt._seconds || 0;
-      return bTime - aTime;
-    });
-
-  if (userTiers.length === 0) {
-    return null;
-  }
-
-  return userTiers[0] as UserTier & { id: string };
+  // Return the user's tier (should be only one per user)
+  return {
+    id: querySnapshot.docs[0].id,
+    ...querySnapshot.docs[0].data()
+  } as TierEntity & { id: string };
 };
 
 export const cancelUserSubscription = async (userId: string, reason: string = 'upgrade') => {
@@ -139,7 +114,7 @@ export const cancelUserSubscription = async (userId: string, reason: string = 'u
       });
       
       console.log('Cancelled subscription for user:', userId, 'reason:', reason);
-      return activeDoc.data() as UserTier;
+      return activeDoc.data() as TierEntity;
     }
   }
   

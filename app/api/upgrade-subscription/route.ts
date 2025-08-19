@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getPlanDetails } from '@/lib/billing-config';
-import { getUserTier, updateUserTier } from '@/lib/firebase';
+import { getPlanDetails, calculateRefundAmount, getDaysUsedInCycle, getLastBillingDate } from '@/lib/billing-config';
+import { getUserTier, updateUserTier, cancelUserSubscription } from '@/lib/firebase';
 import Razorpay from 'razorpay';
 
 // CORS headers
@@ -55,17 +55,19 @@ export async function POST(request: NextRequest) {
 
     // Get current user tier to verify subscription
     const currentTier = await getUserTier(username);
-    if (!currentTier || currentTier.subscriptionId !== currentSubscriptionId) {
+    if (!currentTier || currentTier.billing?.razorpaySubscriptionId !== currentSubscriptionId) {
       return NextResponse.json(
         { error: 'Current subscription not found or mismatch' },
         { status: 404, headers: corsHeaders }
       );
     }
 
-    // Check if it's actually an upgrade/downgrade
-    if (currentTier.planId === newPlanId) {
+    // Check if it's actually an upgrade/downgrade based on tier
+    const currentTierType = currentTier.tier;
+    const newTierType = newPlanDetails.tier;
+    if (currentTierType === newTierType) {
       return NextResponse.json(
-        { error: 'User is already on this plan' },
+        { error: 'User is already on this tier' },
         { status: 400, headers: corsHeaders }
       );
     }
@@ -76,80 +78,191 @@ export async function POST(request: NextRequest) {
       key_secret: process.env.RAZORPAY_SECRET!,
     });
 
-    console.log(`Processing ${changeType} for subscription:`, currentSubscriptionId, 'to plan:', newPlanId);
+    console.log(`Processing ${changeType} using cancel+refund+create flow`);
 
-    // Handle upgrade vs downgrade differently
-    const scheduleChangeAt = changeType === 'upgrade' ? 'now' : 'cycle_end';
-    
-    const updateParams: any = {
-      plan_id: newPlanId,
-      schedule_change_at: scheduleChangeAt,
-    };
+    let refundAmount = 0;
+    let refundDetails = null;
+    const currentPlanAmount = currentTier.tier === 'BASIC' ? 99900 : 299900;
 
-    // For upgrades: Apply immediately with proration (charge difference now)
-    // For downgrades: Apply at end of current cycle (no immediate charge)
-    const updatedSubscription = await razorpay.subscriptions.update(currentSubscriptionId, updateParams);
+    // Step 1: Calculate refund (if upgrade) - No refund for downgrades
+    if (changeType === 'upgrade' && currentTier.billing?.subscriptionEndDate) {
+      const lastBillingDate = getLastBillingDate(new Date(currentTier.billing.subscriptionEndDate));
+      const daysUsed = getDaysUsedInCycle(lastBillingDate);
+      refundAmount = calculateRefundAmount(currentPlanAmount, daysUsed);
 
-    console.log('Razorpay subscription updated:', updatedSubscription);
-
-    // Update Firebase based on change type
-    if (changeType === 'upgrade') {
-      // For upgrades, update immediately
-      await updateUserTier(username, currentSubscriptionId, {
-        tier: newPlanDetails.tier,
-        planId: newPlanId,
-        amount: newPlanDetails.amount,
-      });
-    } else {
-      // For downgrades, just mark the pending change (actual change happens at cycle end)
-      await updateUserTier(username, currentSubscriptionId, {
-        pendingPlanChange: newPlanId,
-        pendingTier: newPlanDetails.tier,
-        pendingAmount: newPlanDetails.amount,
+      console.log('Refund calculation:', {
+        paidAmount: currentPlanAmount,
+        daysUsed,
+        refundAmount,
       });
     }
 
-    console.log(`Firebase updated for user: ${username}, change type: ${changeType}`);
+    // Step 2: Cancel current subscription
+    console.log('Cancelling current subscription:', currentSubscriptionId);
+    await razorpay.subscriptions.cancel(currentSubscriptionId, false);
 
-    const responseMessage = changeType === 'upgrade' 
-      ? `${changeType.charAt(0).toUpperCase() + changeType.slice(1)} successful! You'll be charged the prorated difference immediately.`
-      : `${changeType.charAt(0).toUpperCase() + changeType.slice(1)} successful! Your plan will change at the end of the current billing cycle.`;
+    // Step 3: Process refund if applicable (only for upgrades)
+    if (changeType === 'upgrade' && refundAmount > 0) {
+      try {
+        // Get recent payments and filter by subscription
+        const payments = await razorpay.payments.all({ count: 100 });
+        const lastPayment = payments.items.find((p: any) => 
+          p.status === 'captured' && 
+          p.notes && 
+          (p.notes.subscription_id === currentSubscriptionId || p.subscription_id === currentSubscriptionId)
+        );
 
-    const prorationMessage = changeType === 'upgrade'
-      ? 'Razorpay has charged the prorated difference for the remaining days'
-      : 'No immediate charge. Plan change will take effect at the next billing cycle';
+        if (lastPayment) {
+          const refund = await razorpay.payments.refund(lastPayment.id, {
+            amount: refundAmount,
+            speed: 'optimum',
+            notes: {
+              reason: `Refund for ${changeType}: unused subscription period`,
+              subscription_id: currentSubscriptionId,
+              new_plan: newPlanId,
+              days_unused: Math.ceil(refundAmount / (currentPlanAmount / 30)),
+            },
+            receipt: `refund_${currentSubscriptionId}_${Date.now()}`,
+          });
+
+          refundDetails = {
+            refundId: refund.id,
+            amount: refundAmount,
+            status: refund.status,
+          };
+
+          console.log('Refund created:', refundDetails);
+        }
+      } catch (refundError) {
+        console.error('Refund failed:', refundError);
+        // Continue with subscription creation even if refund fails
+      }
+    }
+
+    // Step 4: Create new subscription via payment link
+    const newSubscription = await createRazorpaySubscription({
+      planId: newPlanId,
+      planDetails: newPlanDetails,
+      username,
+      razorpayKeyId: process.env.RAZORPAY_ID!,
+      razorpayKeySecret: process.env.RAZORPAY_SECRET!,
+      isReplacement: true,
+      oldSubscriptionId: currentSubscriptionId,
+    });
+
+    // Step 5: Update Firebase - mark old as cancelled
+    await cancelUserSubscription(username, changeType);
+
+    console.log(`Plan change process completed for user: ${username}`);
+
+    const responseMessage = changeType === 'upgrade'
+      ? `Upgrade initiated! ${refundAmount > 0 ? `₹${refundAmount / 100} refunded for unused period.` : ''} Complete payment for new plan.`
+      : `Downgrade initiated! No refund issued. Complete payment for new plan.`;
 
     return NextResponse.json({
       success: true,
       message: responseMessage,
       changeType: changeType,
+      paymentLink: newSubscription.short_url,
       subscription: {
-        id: updatedSubscription.id,
-        status: updatedSubscription.status,
+        id: newSubscription.id,
+        status: newSubscription.status,
         planId: newPlanId,
         tier: newPlanDetails.tier,
         amount: newPlanDetails.amount,
-        scheduleChangeAt: scheduleChangeAt,
       },
-      proration: {
-        message: prorationMessage,
-        newTier: newPlanDetails.tier,
-        newAmount: newPlanDetails.amount / 100, // Convert paise to rupees for display
-        appliedAt: changeType === 'upgrade' ? 'immediately' : 'next_billing_cycle',
-      }
+      refund: refundDetails,
+      refundAmount: refundAmount / 100, // Convert to rupees for display
     }, {
       status: 200,
       headers: corsHeaders,
     });
 
   } catch (error) {
-    console.error('Error upgrading subscription:', error);
+    console.error('Error processing plan change:', error);
     return NextResponse.json(
-      { 
-        error: 'Failed to upgrade subscription',
+      {
+        error: 'Failed to process plan change',
         details: error instanceof Error ? error.message : 'Unknown error'
       },
       { status: 500, headers: corsHeaders }
     );
   }
+}
+
+// Helper function to create new subscription
+async function createRazorpaySubscription({
+  planId,
+  planDetails,
+  username,
+  razorpayKeyId,
+  razorpayKeySecret,
+  isReplacement = false,
+  oldSubscriptionId,
+}: {
+  planId: string;
+  planDetails: { tier: string; renewalPeriod: string; amount: number };
+  username: string;
+  razorpayKeyId: string;
+  razorpayKeySecret: string;
+  isReplacement?: boolean;
+  oldSubscriptionId?: string;
+}): Promise<any> {
+  const totalCount = planDetails.renewalPeriod === 'MONTHLY' ? 12 : 5;
+
+  const subscriptionData = {
+    plan_id: planId,
+    total_count: totalCount,
+    quantity: 1,
+    customer_notify: true,
+    notes: {
+      userId: `USER#${username}`,
+      tier: planDetails.tier,
+      renewalPeriod: planDetails.renewalPeriod,
+      planId: planId,
+      isReplacement: isReplacement ? 'true' : 'false',
+      oldSubscriptionId: oldSubscriptionId || '',
+    },
+  };
+
+  const postData = JSON.stringify(subscriptionData);
+  const auth = Buffer.from(`${razorpayKeyId}:${razorpayKeySecret}`).toString('base64');
+
+  const https = await import('https');
+
+  const options = {
+    hostname: 'api.razorpay.com',
+    port: 443,
+    path: '/v1/subscriptions',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(postData),
+      Authorization: `Basic ${auth}`,
+    },
+  };
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      res.on('end', () => {
+        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+          const subscription = JSON.parse(data);
+          resolve(subscription);
+        } else {
+          reject(new Error(`Razorpay API error: ${res.statusCode} - ${data}`));
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      reject(error);
+    });
+
+    req.write(postData);
+    req.end();
+  });
 }

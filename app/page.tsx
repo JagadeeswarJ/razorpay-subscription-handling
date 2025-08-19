@@ -12,29 +12,27 @@ interface SubscriptionPlan {
   features: string[];
 }
 
-interface UserBilling {
+interface UserTierInfo {
   hasSubscription: boolean;
   username: string;
-  subscription?: {
-    id: string;
-    tier: 'BASIC' | 'PRO';
-    status: string;
-    planId: string;
-    amount: number;
-    renewalPeriod: string;
-    nextBillingDate: any;
-    createdAt: any;
-    updatedAt: any;
-    pendingPlanChange?: string | null;
-    pendingTier?: 'BASIC' | 'PRO' | null;
-    pendingAmount?: number | null;
+  tierEntity?: {
+    tier: "NONE" | "BASIC" | "PRO" | "TRIAL";
+    billing?: {
+      renewalPeriod: "MONTHLY" | "ANNUAL" | null;
+      subscriptionStartDate: string | null;
+      subscriptionEndDate: string | null;
+      razorpaySubscriptionId?: string;
+      razorpayCustomerId?: string;
+    };
+    createdAt: string;
+    updatedAt: string;
   };
 }
 
 export default function Home() {
   const [loading, setLoading] = useState(false);
-  const [username, setUsername] = useState("testuser");
-  const [userBilling, setUserBilling] = useState<UserBilling | null>(null);
+  const [username, setUsername] = useState("919700550849");
+  const [userBilling, setUserBilling] = useState<UserTierInfo | null>(null);
   const [fetchingBilling, setFetchingBilling] = useState(false);
 
   const subscriptionPlans: SubscriptionPlan[] = [
@@ -62,7 +60,7 @@ export default function Home() {
     setFetchingBilling(true);
     try {
       const response = await fetch(`/api/user-billing?username=${encodeURIComponent(usernameToFetch)}`);
-      const data: UserBilling = await response.json();
+      const data: UserTierInfo = await response.json();
       
       console.log('User billing data:', data);
       setUserBilling(data);
@@ -85,11 +83,11 @@ export default function Home() {
     console.log('Handling subscription for plan:', plan.id);
     
     // For upgrades, use the upgrade API directly (no payment page needed)
-    if (userBilling?.hasSubscription && userBilling.subscription?.status === 'ACTIVE') {
-      const currentTier = userBilling.subscription.tier;
+    if (userBilling?.hasSubscription && userBilling.tierEntity?.billing?.razorpaySubscriptionId) {
+      const currentTier = userBilling.tierEntity.tier;
       const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
       
-      if (currentTier !== newTier) {
+      if (currentTier !== newTier && (currentTier === 'BASIC' || currentTier === 'PRO')) {
         // This is a plan change (upgrade/downgrade) - handle directly with Razorpay API
         setLoading(true);
         
@@ -108,7 +106,7 @@ export default function Home() {
             body: JSON.stringify({
               username: username,
               newPlanId: plan.razorpayPlanId,
-              currentSubscriptionId: userBilling.subscription.id,
+              currentSubscriptionId: userBilling.tierEntity.billing.razorpaySubscriptionId,
               changeType: changeType, // 'upgrade' or 'downgrade'
             }),
           });
@@ -116,14 +114,21 @@ export default function Home() {
           const result = await response.json();
           
           if (response.ok && result.success) {
-            const successMessage = isUpgrade 
-              ? `🎉 Upgrade successful! You'll be charged the prorated difference for the remaining days.`
-              : `✅ Downgrade successful! Your plan will change at the next billing cycle.`;
+            if (result.paymentLink) {
+              // New flow: Redirect to payment link for new subscription
+              const message = isUpgrade 
+                ? `🎉 Current subscription cancelled! ${result.refundAmount > 0 ? `₹${result.refundAmount} will be refunded.` : ''} Redirecting to complete payment for new plan...`
+                : `✅ Current subscription cancelled! Redirecting to complete payment for new plan...`;
               
-            alert(successMessage);
-            
-            // Refresh user billing data to show updated subscription
-            await fetchUserBilling(username);
+              alert(message);
+              
+              // Redirect to payment link
+              window.location.href = result.paymentLink;
+            } else {
+              // Fallback message
+              alert(result.message || `${changeType} initiated successfully`);
+              await fetchUserBilling(username);
+            }
           } else {
             alert(`Error: ${result.error || `Failed to ${changeType} subscription`}`);
           }
@@ -145,10 +150,10 @@ export default function Home() {
   const getButtonText = (plan: SubscriptionPlan): string => {
     if (!userBilling?.hasSubscription) return "Subscribe Now";
     
-    const currentTier = userBilling.subscription?.tier;
+    const currentTier = userBilling.tierEntity?.tier;
     const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
     
-    if (userBilling.subscription?.status !== 'ACTIVE') return "Subscribe Now";
+    if (!userBilling.tierEntity?.billing?.razorpaySubscriptionId) return "Subscribe Now";
     
     if (currentTier === newTier) return "Current Plan";
     
@@ -163,10 +168,10 @@ export default function Home() {
     
     if (!userBilling?.hasSubscription) return false;
     
-    const currentTier = userBilling.subscription?.tier;
+    const currentTier = userBilling.tierEntity?.tier;
     const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
     
-    return userBilling.subscription?.status === 'ACTIVE' && currentTier === newTier;
+    return !!userBilling.tierEntity?.billing?.razorpaySubscriptionId && currentTier === newTier;
   };
 
   return (
@@ -190,7 +195,7 @@ export default function Home() {
             type="text"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            className="w-full px-4 py-2 border border-gray-300 text-black rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
             placeholder="Enter your username"
           />
         </div>
@@ -259,29 +264,27 @@ export default function Home() {
                 <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600 mx-auto mb-2"></div>
                 <p className="text-gray-600">Loading subscription status...</p>
               </div>
-            ) : userBilling?.hasSubscription && userBilling.subscription ? (
+            ) : userBilling?.hasSubscription && userBilling.tierEntity ? (
               <>
                 <p className="text-gray-700">
-                  <strong>Status:</strong> {userBilling.subscription.status}
+                  <strong>Status:</strong> {userBilling.tierEntity.billing?.razorpaySubscriptionId ? 'ACTIVE' : 'INACTIVE'}
                 </p>
                 <p className="text-gray-700 mt-2">
-                  <strong>Current Plan:</strong> {userBilling.subscription.tier} (₹{userBilling.subscription.amount / 100}/month)
+                  <strong>Current Plan:</strong> {userBilling.tierEntity.tier} {userBilling.tierEntity.tier === 'BASIC' ? '(₹999/month)' : userBilling.tierEntity.tier === 'PRO' ? '(₹2999/month)' : ''}
                 </p>
-                {userBilling.subscription.pendingPlanChange && userBilling.subscription.pendingTier && (
-                  <p className="text-orange-700 mt-2">
-                    <strong>⏳ Pending Change:</strong> Will switch to {userBilling.subscription.pendingTier} (₹{userBilling.subscription.pendingAmount! / 100}/month) at next billing cycle
+                <p className="text-gray-700 mt-2">
+                  <strong>Renewal Period:</strong> {userBilling.tierEntity.billing?.renewalPeriod || 'N/A'}
+                </p>
+                {userBilling.tierEntity.billing?.subscriptionEndDate && (
+                  <p className="text-gray-700 mt-2">
+                    <strong>Next Billing:</strong> {new Date(userBilling.tierEntity.billing.subscriptionEndDate).toLocaleDateString()}
                   </p>
                 )}
-                <p className="text-gray-700 mt-2">
-                  <strong>Next Billing:</strong> {
-                    userBilling.subscription.nextBillingDate 
-                      ? new Date(userBilling.subscription.nextBillingDate._seconds * 1000).toLocaleDateString()
-                      : 'N/A'
-                  }
-                </p>
-                <p className="text-gray-700 mt-2">
-                  <strong>Subscription ID:</strong> {userBilling.subscription.id}
-                </p>
+                {userBilling.tierEntity.billing?.razorpaySubscriptionId && (
+                  <p className="text-gray-700 mt-2">
+                    <strong>Subscription ID:</strong> {userBilling.tierEntity.billing.razorpaySubscriptionId}
+                  </p>
+                )}
               </>
             ) : (
               <>

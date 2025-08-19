@@ -68,6 +68,14 @@ export async function POST(request: NextRequest) {
       case 'payment.failed':
         console.log('Payment failed:', event.payload.payment.entity);
         break;
+        
+      case 'refund.created':
+        await handleRefundCreated(event.payload.refund.entity);
+        break;
+        
+      case 'refund.processed':
+        await handleRefundProcessed(event.payload.refund.entity);
+        break;
 
       case 'subscription.activated':
         await handleSubscriptionActivated(event.payload.subscription.entity);
@@ -110,9 +118,9 @@ async function handlePaymentCaptured(payment: any) {
   // Update user tier with payment details
   if (payment.notes && payment.notes.userId && payment.notes.subscription_id) {
     const userId = payment.notes.userId.replace('USER#', '');
-    await updateUserTier(userId, payment.notes.subscription_id, {
-      paymentId: payment.id,
-      status: 'ACTIVE',
+    await updateUserTier(userId, {
+      'billing.razorpaySubscriptionId': payment.notes.subscription_id,
+      tier: 'BASIC' // Will be updated by subscription.activated event
     });
   }
 }
@@ -139,14 +147,17 @@ async function handleSubscriptionActivated(subscription: any) {
       nextBillingDate.setMonth(nextBillingDate.getMonth() + 1);
 
       await createUserTier({
+        entityType: "Tier",
         userId,
         tier: planDetails.tier,
-        subscriptionId: subscription.id,
-        status: 'ACTIVE',
-        renewalPeriod: planDetails.renewalPeriod,
-        amount: planDetails.amount,
-        planId: subscription.notes.planId,
-        nextBillingDate: Timestamp.fromDate(nextBillingDate),
+        billing: {
+          renewalPeriod: planDetails.renewalPeriod,
+          trialStartDate: null,
+          trialEndDate: null,
+          subscriptionStartDate: new Date().toISOString(),
+          subscriptionEndDate: nextBillingDate.toISOString(),
+          razorpaySubscriptionId: subscription.id,
+        },
       });
       
       console.log(`${isUpgrade ? 'Upgrade' : 'New'} subscription activated for user:`, userId);
@@ -164,9 +175,8 @@ async function handleSubscriptionCharged(subscription: any) {
     const nextBillingDate = new Date();
     nextBillingDate.setMonth(nextBillingDate.getMonth() + 1);
 
-    await updateUserTier(userId, subscription.id, {
-      status: 'ACTIVE',
-      nextBillingDate: Timestamp.fromDate(nextBillingDate),
+    await updateUserTier(userId, {
+      'billing.subscriptionEndDate': nextBillingDate.toISOString(),
     });
   }
 }
@@ -176,8 +186,9 @@ async function handleSubscriptionCancelled(subscription: any) {
 
   if (subscription.notes && subscription.notes.userId) {
     const userId = subscription.notes.userId.replace('USER#', '');
-    await updateUserTier(userId, subscription.id, {
-      status: 'CANCELLED',
+    await updateUserTier(userId, {
+      'billing.razorpaySubscriptionId': FieldValue.delete(),
+      'billing.subscriptionEndDate': FieldValue.delete(),
     });
   }
 }
@@ -193,19 +204,42 @@ async function handleSubscriptionUpdated(subscription: any) {
       console.log('Processing subscription update for:', userId);
       
       // Update Firebase with new plan details and clear any pending changes
-      await updateUserTier(userId, subscription.id, {
+      await updateUserTier(userId, {
         tier: planDetails.tier,
-        planId: subscription.notes.planId,
-        amount: planDetails.amount,
-        status: 'ACTIVE',
-        // Clear pending change fields if they exist
-        pendingPlanChange: FieldValue.delete(),
-        pendingTier: FieldValue.delete(),
-        pendingAmount: FieldValue.delete(),
+        'billing.renewalPeriod': planDetails.renewalPeriod,
       });
       
       console.log('Subscription update processed for user:', userId, 'new tier:', planDetails.tier);
     }
+  }
+}
+
+async function handleRefundCreated(refund: any) {
+  console.log('Refund created:', refund);
+  
+  // Log refund creation for audit trail
+  if (refund.notes && refund.notes.subscription_id) {
+    console.log('Refund created for subscription plan change:', {
+      refundId: refund.id,
+      amount: refund.amount,
+      reason: refund.notes.reason,
+      subscriptionId: refund.notes.subscription_id,
+      status: refund.status,
+    });
+  }
+}
+
+async function handleRefundProcessed(refund: any) {
+  console.log('Refund processed successfully:', refund);
+  
+  // Update any relevant records if needed
+  if (refund.notes && refund.notes.subscription_id) {
+    console.log('Refund processed for subscription plan change:', {
+      refundId: refund.id,
+      amount: refund.amount,
+      status: refund.status,
+      processedAt: new Date().toISOString(),
+    });
   }
 }
 
@@ -214,8 +248,10 @@ async function handleSubscriptionCompleted(subscription: any) {
 
   if (subscription.notes && subscription.notes.userId) {
     const userId = subscription.notes.userId.replace('USER#', '');
-    await updateUserTier(userId, subscription.id, {
-      status: 'EXPIRED',
+    await updateUserTier(userId, {
+      'billing.razorpaySubscriptionId': FieldValue.delete(),
+      'billing.subscriptionEndDate': FieldValue.delete(),
+      tier: 'NONE',
     });
   }
 }

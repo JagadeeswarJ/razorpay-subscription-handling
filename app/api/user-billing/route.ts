@@ -30,14 +30,15 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       hasSubscription: true,
       username: username,
-      subscription: {
-        id: userTier.subscriptionId,
+      tierEntity: {
         tier: userTier.tier,
-        status: userTier.status,
-        planId: userTier.planId,
-        amount: userTier.amount,
-        renewalPeriod: userTier.renewalPeriod,
-        nextBillingDate: userTier.nextBillingDate,
+        billing: userTier.billing ? {
+          renewalPeriod: userTier.billing.renewalPeriod,
+          subscriptionStartDate: userTier.billing.subscriptionStartDate,
+          subscriptionEndDate: userTier.billing.subscriptionEndDate,
+          razorpaySubscriptionId: userTier.billing.razorpaySubscriptionId,
+          razorpayCustomerId: userTier.billing.razorpayCustomerId,
+        } : undefined,
         createdAt: userTier.createdAt,
         updatedAt: userTier.updatedAt,
       }

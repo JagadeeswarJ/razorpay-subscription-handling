@@ -55,3 +55,32 @@ export const getDaysRemainingInCycle = (nextBillingDate: Date): number => {
   const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
   return Math.max(0, diffDays);
 };
+
+// Calculate refund for unused subscription period
+export const calculateRefundAmount = (
+  paidAmount: number, // Amount paid in paise
+  daysUsed: number,
+  totalDaysInCycle: number = 30
+): number => {
+  const unusedDays = totalDaysInCycle - daysUsed;
+  const dailyRate = paidAmount / totalDaysInCycle;
+  const refundAmount = Math.round(dailyRate * unusedDays);
+  
+  // Minimum refund of ₹1 if there are unused days
+  return unusedDays > 0 ? Math.max(refundAmount, 100) : 0; // 100 paise = ₹1
+};
+
+// Calculate days used since last billing
+export const getDaysUsedInCycle = (lastBillingDate: Date): number => {
+  const now = new Date();
+  const diffTime = now.getTime() - lastBillingDate.getTime();
+  const daysUsed = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+  return Math.max(0, daysUsed);
+};
+
+// Get last billing date (start of current cycle)
+export const getLastBillingDate = (nextBillingDate: Date): Date => {
+  const lastBilling = new Date(nextBillingDate);
+  lastBilling.setMonth(lastBilling.getMonth() - 1);
+  return lastBilling;
+};

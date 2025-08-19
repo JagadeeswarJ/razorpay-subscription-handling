@@ -54,7 +54,7 @@ export const createUserTier = async (data: Omit<UserTier, 'createdAt' | 'updated
 export const updateUserTier = async (
   userId: string, 
   subscriptionId: string,
-  updates: Partial<UserTier>
+  updates: Partial<UserTier> | Record<string, any>
 ) => {
   const now = new Date();
   const updatedData = {

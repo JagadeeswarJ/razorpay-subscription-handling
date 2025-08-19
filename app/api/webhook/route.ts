@@ -199,9 +199,9 @@ async function handleSubscriptionUpdated(subscription: any) {
         amount: planDetails.amount,
         status: 'ACTIVE',
         // Clear pending change fields if they exist
-        pendingPlanChange: undefined,
-        pendingTier: undefined,
-        pendingAmount: undefined,
+        pendingPlanChange: FieldValue.delete(),
+        pendingTier: FieldValue.delete(),
+        pendingAmount: FieldValue.delete(),
       });
       
       console.log('Subscription update processed for user:', userId, 'new tier:', planDetails.tier);

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { createUserTier, updateUserTier, cancelUserSubscription } from '@/lib/firebase';
+import { createUserTier, updateUserTier, cancelUserSubscription, getUserTier } from '@/lib/firebase';
 import { getPlanDetails } from '@/lib/billing-config';
 import { Timestamp, FieldValue } from 'firebase-admin/firestore';
 
@@ -80,6 +80,10 @@ export async function POST(request: NextRequest) {
       case 'subscription.activated':
         await handleSubscriptionActivated(event.payload.subscription.entity);
         break;
+
+      case 'subscription.authenticated':
+        await handleSubscriptionAuthenticated(event.payload.subscription.entity);
+        break;
         
       case 'subscription.updated':
         await handleSubscriptionUpdated(event.payload.subscription.entity);
@@ -115,12 +119,44 @@ export async function POST(request: NextRequest) {
 async function handlePaymentCaptured(payment: any) {
   console.log('Payment captured:', payment);
 
-  // Update user tier with payment details
+  // Check if this is a prorated upgrade payment
+  if (payment.notes && payment.notes.type === 'prorated_upgrade' && payment.notes.username) {
+    const username = payment.notes.username;
+    const orderId = payment.notes.orderId;
+    
+    console.log('Prorated upgrade payment captured for user:', username);
+    
+    // Get current user tier to process the upgrade
+    const currentTier = await getUserTier(username);
+    if (currentTier?.billing?.upgradeInProgress && currentTier.billing?.proratedOrderId === orderId) {
+      await processImmediateUpgrade(username, currentTier);
+    }
+    return;
+  }
+
+  // Handle regular subscription payments
   if (payment.notes && payment.notes.userId && payment.notes.subscription_id) {
     const userId = payment.notes.userId.replace('USER#', '');
     await updateUserTier(userId, {
       'billing.razorpaySubscriptionId': payment.notes.subscription_id,
       tier: 'BASIC' // Will be updated by subscription.activated event
+    });
+  }
+}
+
+async function handleSubscriptionAuthenticated(subscription: any) {
+  console.log('Subscription authenticated (UPI mandate created):', subscription);
+  
+  // This event is fired when UPI mandate is successfully created
+  // We can use this to track when the mandate is ready for billing
+  if (subscription.notes && subscription.notes.userId) {
+    const userId = subscription.notes.userId.replace('USER#', '');
+    console.log('UPI mandate authenticated for user:', userId);
+    
+    // Optionally update user tier with mandate status
+    await updateUserTier(userId, {
+      'billing.mandateAuthenticated': true,
+      'billing.mandateAuthenticatedAt': new Date().toISOString(),
     });
   }
 }
@@ -253,5 +289,42 @@ async function handleSubscriptionCompleted(subscription: any) {
       'billing.subscriptionEndDate': FieldValue.delete(),
       tier: 'NONE',
     });
+  }
+}
+
+// Process immediate upgrade after prorated payment
+async function processImmediateUpgrade(username: string, currentTier: any) {
+  try {
+    console.log('Processing immediate upgrade for user:', username);
+    
+    const newPlanId = currentTier.billing?.newPlanId;
+    if (!newPlanId) {
+      console.error('No new plan ID found for upgrade');
+      return;
+    }
+
+    // Get new plan details
+    const newPlanDetails = getPlanDetails(newPlanId);
+    if (!newPlanDetails) {
+      console.error('Invalid new plan ID:', newPlanId);
+      return;
+    }
+
+    // Update user tier immediately with new plan details
+    const updates = {
+      tier: newPlanDetails.tier,
+      'billing.upgradeInProgress': false,
+      'billing.proratedPaid': true,
+      'billing.proratedPaidAt': new Date().toISOString(),
+      // Keep the current subscription active until next billing cycle
+      // The new subscription (newSubscriptionId) will take over then
+    };
+
+    await updateUserTier(username, updates);
+
+    console.log(`Immediate upgrade completed for user ${username} to tier ${newPlanDetails.tier}`);
+
+  } catch (error) {
+    console.error('Error processing immediate upgrade:', error);
   }
 }

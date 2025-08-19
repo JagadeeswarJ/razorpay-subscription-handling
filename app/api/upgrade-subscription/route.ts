@@ -1,20 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getPlanDetails, calculateRefundAmount, getDaysUsedInCycle, getLastBillingDate } from '@/lib/billing-config';
-import { getUserTier, updateUserTier, cancelUserSubscription } from '@/lib/firebase';
+import { getPlanDetails, calculateProratedUpgradeCost, getDaysRemainingInCycle, getTotalDaysInCycle } from '@/lib/billing-config';
+import { getUserTier, updateUserTier } from '@/lib/firebase';
 import Razorpay from 'razorpay';
 
-// CORS headers
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
   'Access-Control-Allow-Methods': 'POST,OPTIONS',
 };
 
-interface PlanChangeRequest {
+interface UpgradeRequest {
   username: string;
   newPlanId: string;
   currentSubscriptionId: string;
-  changeType: 'upgrade' | 'downgrade';
 }
 
 export async function OPTIONS() {
@@ -26,20 +24,13 @@ export async function OPTIONS() {
 
 export async function POST(request: NextRequest) {
   try {
-    const { username, newPlanId, currentSubscriptionId, changeType }: PlanChangeRequest = await request.json();
+    const { username, newPlanId, currentSubscriptionId }: UpgradeRequest = await request.json();
 
-    console.log('Subscription plan change request:', { username, newPlanId, currentSubscriptionId, changeType });
+    console.log('Upgrade subscription request:', { username, newPlanId, currentSubscriptionId });
 
-    if (!username || !newPlanId || !currentSubscriptionId || !changeType) {
+    if (!username || !newPlanId || !currentSubscriptionId) {
       return NextResponse.json(
-        { error: 'username, newPlanId, currentSubscriptionId, and changeType are required' },
-        { status: 400, headers: corsHeaders }
-      );
-    }
-
-    if (!['upgrade', 'downgrade'].includes(changeType)) {
-      return NextResponse.json(
-        { error: 'changeType must be either "upgrade" or "downgrade"' },
+        { error: 'username, newPlanId, and currentSubscriptionId are required' },
         { status: 400, headers: corsHeaders }
       );
     }
@@ -62,7 +53,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Check if it's actually an upgrade/downgrade based on tier
+    // Check if it's actually an upgrade
     const currentTierType = currentTier.tier;
     const newTierType = newPlanDetails.tier;
     if (currentTierType === newTierType) {
@@ -78,116 +69,124 @@ export async function POST(request: NextRequest) {
       key_secret: process.env.RAZORPAY_SECRET!,
     });
 
-    console.log(`Processing ${changeType} using cancel+refund+create flow`);
+    // Step 1: Calculate prorated upgrade cost
+    let proratedAmount = 0;
+    if (currentTier.billing?.subscriptionEndDate) {
+      const subscriptionEndDate = new Date(currentTier.billing.subscriptionEndDate);
+      const daysRemaining = getDaysRemainingInCycle(subscriptionEndDate);
+      const totalDays = getTotalDaysInCycle(currentTier.billing.renewalPeriod || "MONTHLY");
+      
+      // Get current plan amount based on tier
+      const currentPlanDetails = getPlanDetails(getCurrentPlanId(currentTier.tier, currentTier.billing.renewalPeriod || "MONTHLY"));
+      const currentPlanAmount = currentPlanDetails?.amount || 0;
+      
+      proratedAmount = calculateProratedUpgradeCost(
+        currentPlanAmount,
+        newPlanDetails.amount,
+        daysRemaining,
+        totalDays
+      );
 
-    let refundAmount = 0;
-    let refundDetails = null;
-    const currentPlanAmount = currentTier.tier === 'BASIC' ? 99900 : 299900;
-
-    // Step 1: Calculate refund (if upgrade) - No refund for downgrades
-    if (changeType === 'upgrade' && currentTier.billing?.subscriptionEndDate) {
-      const lastBillingDate = getLastBillingDate(new Date(currentTier.billing.subscriptionEndDate));
-      const daysUsed = getDaysUsedInCycle(lastBillingDate);
-      refundAmount = calculateRefundAmount(currentPlanAmount, daysUsed);
-
-      console.log('Refund calculation:', {
-        paidAmount: currentPlanAmount,
-        daysUsed,
-        refundAmount,
+      console.log('Prorated calculation:', {
+        currentPlanAmount,
+        newPlanAmount: newPlanDetails.amount,
+        daysRemaining,
+        totalDays,
+        proratedAmount,
       });
     }
 
-    // Step 2: Cancel current subscription
-    console.log('Cancelling current subscription:', currentSubscriptionId);
-    await razorpay.subscriptions.cancel(currentSubscriptionId, false);
+    let proratedPaymentOrder = null;
+    
+    // Step 2: Create prorated payment order if needed
+    if (proratedAmount > 0) {
+      proratedPaymentOrder = await razorpay.orders.create({
+        amount: proratedAmount, // amount in paise
+        currency: 'INR',
+        receipt: `upgrade_${currentSubscriptionId}_${Date.now()}`,
+        notes: {
+          userId: `USER#${username}`,
+          subscriptionId: currentSubscriptionId,
+          newPlanId: newPlanId,
+          upgradeType: 'prorated',
+          proratedAmount: proratedAmount.toString(),
+        },
+      });
 
-    // Step 3: Process refund if applicable (only for upgrades)
-    if (changeType === 'upgrade' && refundAmount > 0) {
-      try {
-        // Get recent payments and filter by subscription
-        const payments = await razorpay.payments.all({ count: 100 });
-        const lastPayment = payments.items.find((p: any) => 
-          p.status === 'captured' && 
-          p.notes && 
-          (p.notes.subscription_id === currentSubscriptionId || p.subscription_id === currentSubscriptionId)
-        );
-
-        if (lastPayment) {
-          const refund = await razorpay.payments.refund(lastPayment.id, {
-            amount: refundAmount,
-            speed: 'optimum',
-            notes: {
-              reason: `Refund for ${changeType}: unused subscription period`,
-              subscription_id: currentSubscriptionId,
-              new_plan: newPlanId,
-              days_unused: Math.ceil(refundAmount / (currentPlanAmount / 30)),
-            },
-            receipt: `refund_${currentSubscriptionId}_${Date.now()}`,
-          });
-
-          refundDetails = {
-            refundId: refund.id,
-            amount: refundAmount,
-            status: refund.status,
-          };
-
-          console.log('Refund created:', refundDetails);
-        }
-      } catch (refundError) {
-        console.error('Refund failed:', refundError);
-        // Continue with subscription creation even if refund fails
-      }
+      console.log('Prorated payment order created:', proratedPaymentOrder.id);
     }
 
-    // Step 4: Create new subscription via payment link
+    // Step 3: Create new subscription for next cycle
     const newSubscription = await createRazorpaySubscription({
       planId: newPlanId,
       planDetails: newPlanDetails,
       username,
       razorpayKeyId: process.env.RAZORPAY_ID!,
       razorpayKeySecret: process.env.RAZORPAY_SECRET!,
-      isReplacement: true,
+      isUpgrade: true,
       oldSubscriptionId: currentSubscriptionId,
+      startAt: currentTier.billing?.subscriptionEndDate ? Math.floor(new Date(currentTier.billing.subscriptionEndDate).getTime() / 1000) : undefined,
     });
 
-    // Step 5: Update Firebase - mark old as cancelled
-    await cancelUserSubscription(username, changeType);
+    // Step 4: Update user tier with upgrade info
+    await updateUserTier(username, {
+      'billing.upgradeInProgress': true,
+      'billing.newPlanId': newPlanId,
+      'billing.newSubscriptionId': newSubscription.id,
+      'billing.proratedOrderId': proratedPaymentOrder?.id || null,
+      'billing.proratedAmount': proratedAmount,
+    });
 
-    console.log(`Plan change process completed for user: ${username}`);
-
-    const responseMessage = changeType === 'upgrade'
-      ? `Upgrade initiated! ${refundAmount > 0 ? `₹${refundAmount / 100} refunded for unused period.` : ''} Complete payment for new plan.`
-      : `Downgrade initiated! No refund issued. Complete payment for new plan.`;
+    console.log('Upgrade process initiated for user:', username);
 
     return NextResponse.json({
       success: true,
-      message: responseMessage,
-      changeType: changeType,
-      paymentLink: newSubscription.short_url,
-      subscription: {
+      message: proratedAmount > 0 
+        ? `Upgrade initiated! Pay ₹${proratedAmount / 100} prorated amount to complete upgrade.`
+        : 'Upgrade initiated! Your new plan will start from the next billing cycle.',
+      upgradeType: proratedAmount > 0 ? 'immediate_with_proration' : 'next_cycle',
+      proratedPayment: proratedPaymentOrder ? {
+        orderId: proratedPaymentOrder.id,
+        amount: proratedAmount,
+        currency: 'INR',
+      } : null,
+      newSubscription: {
         id: newSubscription.id,
         status: newSubscription.status,
         planId: newPlanId,
         tier: newPlanDetails.tier,
         amount: newPlanDetails.amount,
+        startDate: currentTier.billing?.subscriptionEndDate || new Date().toISOString(),
       },
-      refund: refundDetails,
-      refundAmount: refundAmount / 100, // Convert to rupees for display
+      proratedAmount: proratedAmount / 100, // Convert to rupees for display
     }, {
       status: 200,
       headers: corsHeaders,
     });
 
   } catch (error) {
-    console.error('Error processing plan change:', error);
+    console.error('Error processing upgrade:', error);
     return NextResponse.json(
       {
-        error: 'Failed to process plan change',
+        error: 'Failed to process upgrade',
         details: error instanceof Error ? error.message : 'Unknown error'
       },
       { status: 500, headers: corsHeaders }
     );
   }
+}
+
+// Helper function to get current plan ID based on tier and renewal period
+function getCurrentPlanId(tier: string, renewalPeriod: string): string {
+  const { RAZORPAY_PLAN_IDS } = require('@/lib/billing-config');
+  
+  if (tier === 'BASIC') {
+    return renewalPeriod === 'ANNUAL' ? RAZORPAY_PLAN_IDS.BASIC_YEARLY : RAZORPAY_PLAN_IDS.BASIC_MONTHLY;
+  } else if (tier === 'PRO') {
+    return renewalPeriod === 'ANNUAL' ? RAZORPAY_PLAN_IDS.PRO_YEARLY : RAZORPAY_PLAN_IDS.PRO_MONTHLY;
+  }
+  
+  return RAZORPAY_PLAN_IDS.BASIC_MONTHLY; // fallback
 }
 
 // Helper function to create new subscription
@@ -197,20 +196,22 @@ async function createRazorpaySubscription({
   username,
   razorpayKeyId,
   razorpayKeySecret,
-  isReplacement = false,
+  isUpgrade = false,
   oldSubscriptionId,
+  startAt,
 }: {
   planId: string;
   planDetails: { tier: string; renewalPeriod: string; amount: number };
   username: string;
   razorpayKeyId: string;
   razorpayKeySecret: string;
-  isReplacement?: boolean;
+  isUpgrade?: boolean;
   oldSubscriptionId?: string;
+  startAt?: number;
 }): Promise<any> {
   const totalCount = planDetails.renewalPeriod === 'MONTHLY' ? 12 : 5;
 
-  const subscriptionData = {
+  const subscriptionData: any = {
     plan_id: planId,
     total_count: totalCount,
     quantity: 1,
@@ -220,10 +221,15 @@ async function createRazorpaySubscription({
       tier: planDetails.tier,
       renewalPeriod: planDetails.renewalPeriod,
       planId: planId,
-      isReplacement: isReplacement ? 'true' : 'false',
+      isUpgrade: isUpgrade ? 'true' : 'false',
       oldSubscriptionId: oldSubscriptionId || '',
     },
   };
+
+  // If startAt is provided, schedule the subscription to start at that time
+  if (startAt) {
+    subscriptionData.start_at = startAt;
+  }
 
   const postData = JSON.stringify(subscriptionData);
   const auth = Buffer.from(`${razorpayKeyId}:${razorpayKeySecret}`).toString('base64');

@@ -23,20 +23,45 @@ function PaymentContent() {
     const createPaymentLink = async () => {
       const username = searchParams.get('username');
       const planId = searchParams.get('planId');
-      const planChange = searchParams.get('planChange');
-      const currentSubscriptionId = searchParams.get('currentSubscriptionId');
+      const orderId = searchParams.get('orderId');
+      const paymentType = searchParams.get('type');
+      
+      console.log('Payment page params:', { username, planId, orderId, paymentType });
 
-      console.log('Payment page params:', { username, planId, planChange, currentSubscriptionId });
+      // Handle prorated payment
+      if (paymentType === 'prorated' && orderId && username) {
+        try {
+          console.log('Creating prorated payment link...');
+          
+          const response = await fetch('/api/create-payment-link', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              username,
+              orderId,
+              type: 'prorated',
+            }),
+          });
 
-      // If this is a plan change (upgrade/downgrade), redirect back to main page
-      // as plan changes should be handled directly, not through payment page
-      if (planChange && currentSubscriptionId) {
-        console.log('Plan change detected, redirecting to main page...');
-        setError('Plan changes are handled directly. Redirecting...');
-        setTimeout(() => {
-          window.location.href = '/';
-        }, 2000);
-        setLoading(false);
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(errorText || `HTTP error! status: ${response.status}`);
+          }
+
+          const data = await response.json();
+          if (data.success && data.paymentLink) {
+            window.location.href = data.paymentLink;
+          } else {
+            setError('Failed to create prorated payment link');
+          }
+        } catch (err) {
+          console.error('Prorated payment error:', err);
+          setError(err instanceof Error ? err.message : 'An unexpected error occurred');
+        } finally {
+          setLoading(false);
+        }
         return;
       }
 

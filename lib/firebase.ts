@@ -32,6 +32,16 @@ export interface TierEntity {
     razorpaySubscriptionId?: string;
     razorpayCustomerId?: string;
     isConfirmationSent?: boolean;
+    isCancelled?: boolean;
+    cancellationReason?: string;
+    cancelledAt?: string;
+    upgradeInProgress?: boolean;
+    newPlanId?: string;
+    newSubscriptionId?: string;
+    proratedAmount?: number;
+    proratedOrderId?: string;
+    proratedPaid?: boolean;
+    proratedPaidAt?: string;
   };
   createdAt: string; // UTC ISO
   updatedAt: string; // UTC ISO
@@ -92,31 +102,31 @@ export const getUserTier = async (userId: string) => {
   } as TierEntity & { id: string };
 };
 
-export const cancelUserSubscription = async (userId: string, reason: string = 'upgrade') => {
-  // Get all user subscriptions and filter in memory
-  const querySnapshot = await db.collection('tier')
-    .where('userId', '==', userId)
-    .get();
+export const cancelUserSubscription = async (userId: string, reason: string = 'cancelled') => {
+  try {
+    const querySnapshot = await db.collection('tier')
+      .where('userId', '==', userId)
+      .get();
 
-  if (!querySnapshot.empty) {
-    // Find active subscription in memory
-    const activeDoc = querySnapshot.docs.find(doc => doc.data().status === 'ACTIVE');
-    
-    if (activeDoc) {
-      const docId = activeDoc.id;
-      const now = new Date();
+    if (!querySnapshot.empty) {
+      const docId = querySnapshot.docs[0].id;
+      const tierData = querySnapshot.docs[0].data() as TierEntity;
       
+      // Mark as cancelled but keep subscription end date so user can use until expiry
       await db.collection('tier').doc(docId).update({
-        status: 'CANCELLED',
-        updatedAt: Timestamp.fromDate(now),
-        cancellationReason: reason,
-        cancelledAt: Timestamp.fromDate(now),
+        'billing.cancellationReason': reason,
+        'billing.cancelledAt': new Date().toISOString(),
+        'billing.isCancelled': true,
+        updatedAt: new Date().toISOString(),
       });
       
-      console.log('Cancelled subscription for user:', userId, 'reason:', reason);
-      return activeDoc.data() as TierEntity;
+      console.log('Marked subscription as cancelled for user:', userId, 'reason:', reason);
+      return tierData;
     }
+  } catch (error) {
+    console.error('Error cancelling user subscription:', error);
   }
   
   return null;
 };
+

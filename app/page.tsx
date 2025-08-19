@@ -23,6 +23,16 @@ interface UserTierInfo {
       subscriptionEndDate: string | null;
       razorpaySubscriptionId?: string;
       razorpayCustomerId?: string;
+      isCancelled?: boolean;
+      cancellationReason?: string;
+      cancelledAt?: string;
+      upgradeInProgress?: boolean;
+      newPlanId?: string;
+      newSubscriptionId?: string;
+      proratedAmount?: number;
+      proratedOrderId?: string;
+      proratedPaid?: boolean;
+      proratedPaidAt?: string;
     };
     createdAt: string;
     updatedAt: string;
@@ -34,13 +44,20 @@ export default function Home() {
   const [username, setUsername] = useState("919700550849");
   const [userBilling, setUserBilling] = useState<UserTierInfo | null>(null);
   const [fetchingBilling, setFetchingBilling] = useState(false);
+  const [upgradeStatus, setUpgradeStatus] = useState<{
+    show: boolean;
+    message: string;
+    type: 'success' | 'error' | 'info';
+    proratedAmount?: number;
+    paymentOrderId?: string;
+  } | null>(null);
 
   const subscriptionPlans: SubscriptionPlan[] = [
     {
       id: "basic_monthly",
       razorpayPlanId: RAZORPAY_PLAN_IDS.BASIC_MONTHLY,
       name: "Basic Plan",
-      price: 999,
+      price: 89,
       duration: "monthly",
       features: ["feature1", "feature2", "feature3"]
     },
@@ -48,20 +65,36 @@ export default function Home() {
       id: "pro_monthly",
       razorpayPlanId: RAZORPAY_PLAN_IDS.PRO_MONTHLY,
       name: "Pro Plan",
-      price: 2999,
+      price: 129,
       duration: "monthly",
+      features: ["feature1", "feature2", "feature3", "feature4", "feature5"]
+    },
+    {
+      id: "basic_yearly",
+      razorpayPlanId: RAZORPAY_PLAN_IDS.BASIC_YEARLY,
+      name: "Basic Plan",
+      price: 749,
+      duration: "yearly",
+      features: ["feature1", "feature2", "feature3"]
+    },
+    {
+      id: "pro_yearly",
+      razorpayPlanId: RAZORPAY_PLAN_IDS.PRO_YEARLY,
+      name: "Pro Plan",
+      price: 1089,
+      duration: "yearly",
       features: ["feature1", "feature2", "feature3", "feature4", "feature5"]
     }
   ];
 
   const fetchUserBilling = async (usernameToFetch: string) => {
     if (!usernameToFetch.trim()) return;
-    
+
     setFetchingBilling(true);
     try {
       const response = await fetch(`/api/user-billing?username=${encodeURIComponent(usernameToFetch)}`);
       const data: UserTierInfo = await response.json();
-      
+
       console.log('User billing data:', data);
       setUserBilling(data);
     } catch (error) {
@@ -75,75 +108,175 @@ export default function Home() {
     }
   };
 
+  const handleUsernameSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    fetchUserBilling(username);
+  };
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      fetchUserBilling(username);
+    }
+  };
+
   useEffect(() => {
     fetchUserBilling(username);
   }, [username]);
 
   const handleSubscribe = async (plan: SubscriptionPlan) => {
     console.log('Handling subscription for plan:', plan.id);
-    
-    // For upgrades, use the upgrade API directly (no payment page needed)
+
+    // Check if user has active subscription and this is an upgrade
     if (userBilling?.hasSubscription && userBilling.tierEntity?.billing?.razorpaySubscriptionId) {
       const currentTier = userBilling.tierEntity.tier;
       const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
       
       if (currentTier !== newTier && (currentTier === 'BASIC' || currentTier === 'PRO')) {
-        // This is a plan change (upgrade/downgrade) - handle directly with Razorpay API
-        setLoading(true);
-        
-        const isUpgrade = currentTier === 'BASIC' && newTier === 'PRO';
-        const isDowngrade = currentTier === 'PRO' && newTier === 'BASIC';
-        const changeType = isUpgrade ? 'upgrade' : 'downgrade';
-        
-        try {
-          console.log(`Processing ${changeType}...`);
-          
-          const response = await fetch('/api/upgrade-subscription', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              username: username,
-              newPlanId: plan.razorpayPlanId,
-              currentSubscriptionId: userBilling.tierEntity.billing.razorpaySubscriptionId,
-              changeType: changeType, // 'upgrade' or 'downgrade'
-            }),
-          });
-
-          const result = await response.json();
-          
-          if (response.ok && result.success) {
-            if (result.paymentLink) {
-              // New flow: Redirect to payment link for new subscription
-              const message = isUpgrade 
-                ? `🎉 Current subscription cancelled! ${result.refundAmount > 0 ? `₹${result.refundAmount} will be refunded.` : ''} Redirecting to complete payment for new plan...`
-                : `✅ Current subscription cancelled! Redirecting to complete payment for new plan...`;
-              
-              alert(message);
-              
-              // Redirect to payment link
-              window.location.href = result.paymentLink;
-            } else {
-              // Fallback message
-              alert(result.message || `${changeType} initiated successfully`);
-              await fetchUserBilling(username);
-            }
-          } else {
-            alert(`Error: ${result.error || `Failed to ${changeType} subscription`}`);
-          }
-        } catch (error) {
-          console.error(`${changeType} error:`, error);
-          alert(`Failed to ${changeType} subscription. Please try again.`);
-        } finally {
-          setLoading(false);
-        }
+        // This is an upgrade - handle via upgrade API
+        await handleUpgrade(plan);
         return;
       }
     }
-    
-    // Regular new subscription - redirect to payment page
+
+    // Simple buy logic - redirect to payment page
     const paymentUrl = `/payment?username=${encodeURIComponent(username)}&planId=${encodeURIComponent(plan.razorpayPlanId)}`;
+    window.location.href = paymentUrl;
+  };
+
+  const handleUpgrade = async (plan: SubscriptionPlan) => {
+    if (!userBilling?.tierEntity?.billing?.razorpaySubscriptionId) {
+      setUpgradeStatus({
+        show: true,
+        message: 'No active subscription found',
+        type: 'error'
+      });
+      return;
+    }
+
+    setLoading(true);
+    setUpgradeStatus(null);
+    
+    try {
+      console.log('Processing upgrade...');
+      
+      const response = await fetch('/api/upgrade-subscription', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          username: username,
+          newPlanId: plan.razorpayPlanId,
+          currentSubscriptionId: userBilling.tierEntity.billing.razorpaySubscriptionId,
+        }),
+      });
+
+      const result = await response.json();
+      
+      if (response.ok && result.success) {
+        if (result.proratedPayment && result.proratedAmount > 0) {
+          setUpgradeStatus({
+            show: true,
+            message: `Upgrade requires prorated payment of ₹${result.proratedAmount}`,
+            type: 'info',
+            proratedAmount: result.proratedAmount,
+            paymentOrderId: result.proratedPayment.orderId
+          });
+        } else {
+          setUpgradeStatus({
+            show: true,
+            message: result.message || 'Upgrade scheduled for next billing cycle!',
+            type: 'success'
+          });
+        }
+        await fetchUserBilling(username);
+      } else {
+        setUpgradeStatus({
+          show: true,
+          message: result.error || 'Failed to upgrade subscription',
+          type: 'error'
+        });
+      }
+    } catch (error) {
+      console.error('Upgrade error:', error);
+      setUpgradeStatus({
+        show: true,
+        message: 'Failed to upgrade subscription. Please try again.',
+        type: 'error'
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!userBilling?.tierEntity?.billing?.razorpaySubscriptionId) {
+      setUpgradeStatus({
+        show: true,
+        message: 'No active subscription found',
+        type: 'error'
+      });
+      return;
+    }
+
+    const endDate = userBilling.tierEntity.billing?.subscriptionEndDate 
+      ? new Date(userBilling.tierEntity.billing.subscriptionEndDate).toLocaleDateString()
+      : 'current period end';
+
+    const confirmMessage = `Are you sure you want to cancel your subscription? You can continue using the service until ${endDate}, then it will stop automatically. No further charges will be made.`;
+
+    if (!confirm(confirmMessage)) {
+      return;
+    }
+
+    setLoading(true);
+    setUpgradeStatus(null);
+    
+    try {
+      console.log('Processing subscription cancellation...');
+      
+      const response = await fetch('/api/cancel-subscription', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          username: username,
+          subscriptionId: userBilling.tierEntity.billing.razorpaySubscriptionId,
+        }),
+      });
+
+      const result = await response.json();
+      
+      if (response.ok && result.success) {
+        setUpgradeStatus({
+          show: true,
+          message: result.message,
+          type: 'success'
+        });
+        await fetchUserBilling(username);
+      } else {
+        setUpgradeStatus({
+          show: true,
+          message: result.error || 'Failed to cancel subscription',
+          type: 'error'
+        });
+      }
+    } catch (error) {
+      console.error('Cancellation error:', error);
+      setUpgradeStatus({
+        show: true,
+        message: 'Failed to cancel subscription. Please try again.',
+        type: 'error'
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleProratedPayment = (orderId: string) => {
+    // Create proper payment page URL for the prorated amount
+    const paymentUrl = `/payment?username=${encodeURIComponent(username)}&orderId=${encodeURIComponent(orderId)}&type=prorated`;
     window.location.href = paymentUrl;
   };
 
@@ -152,13 +285,24 @@ export default function Home() {
     
     const currentTier = userBilling.tierEntity?.tier;
     const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
+    const isYearly = plan.duration === 'yearly';
+    const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
     
     if (!userBilling.tierEntity?.billing?.razorpaySubscriptionId) return "Subscribe Now";
     
-    if (currentTier === newTier) return "Current Plan";
+    // Check if same tier and period
+    if (currentTier === newTier && 
+        ((currentRenewal === 'MONTHLY' && !isYearly) || (currentRenewal === 'ANNUAL' && isYearly))) {
+      return "Current Plan";
+    }
     
+    // Check for upgrades
     if (currentTier === 'BASIC' && newTier === 'PRO') return "Upgrade";
+    if (currentTier === newTier && currentRenewal === 'MONTHLY' && isYearly) return "Switch to Yearly";
+    
+    // Check for downgrades
     if (currentTier === 'PRO' && newTier === 'BASIC') return "Downgrade";
+    if (currentTier === newTier && currentRenewal === 'ANNUAL' && !isYearly) return "Switch to Monthly";
     
     return "Subscribe Now";
   };
@@ -170,135 +314,303 @@ export default function Home() {
     
     const currentTier = userBilling.tierEntity?.tier;
     const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
+    const isYearly = plan.duration === 'yearly';
+    const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
     
-    return !!userBilling.tierEntity?.billing?.razorpaySubscriptionId && currentTier === newTier;
+    // Disable if it's the current plan or if subscription is cancelled
+    return !!userBilling.tierEntity?.billing?.razorpaySubscriptionId && 
+           (userBilling.tierEntity?.billing?.isCancelled ||
+           (currentTier === newTier &&
+           ((currentRenewal === 'MONTHLY' && !isYearly) || (currentRenewal === 'ANNUAL' && isYearly))));
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-4xl mx-auto">
-        <div className="text-center">
-          <h1 className="text-4xl font-bold text-gray-900 mb-8">
-            Choose Your Subscription Plan
+    <div className="min-h-screen bg-gray-50 p-4">
+      <div className="max-w-7xl mx-auto">
+        <div className="text-center mb-6">
+          <h1 className="text-3xl font-bold text-gray-900">
+            Subscription Management
           </h1>
-          <p className="text-lg text-gray-600 mb-12">
-            Select the perfect plan for your needs
-          </p>
         </div>
 
-        {/* Username Input */}
-        <div className="mb-8 max-w-md mx-auto">
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            Username
-          </label>
-          <input
-            type="text"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            className="w-full px-4 py-2 border border-gray-300 text-black rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-            placeholder="Enter your username"
-          />
-        </div>
-
-        <div className="grid md:grid-cols-2 gap-8">
-          {subscriptionPlans.map((plan) => (
-            <div
-              key={plan.id}
-              className="bg-white rounded-lg shadow-lg p-8 border border-gray-200 hover:border-blue-500 transition-colors"
-            >
-              <div className="text-center mb-6">
-                <h3 className="text-2xl font-bold text-gray-900 mb-2">
-                  {plan.name}
-                </h3>
-                <div className="text-4xl font-bold text-blue-600 mb-2">
-                  ₹{plan.price}
-                  <span className="text-lg text-gray-500">/{plan.duration}</span>
-                </div>
-              </div>
-
-              <ul className="space-y-4 mb-8">
-                {plan.features.map((feature, index) => (
-                  <li key={index} className="flex items-center text-gray-700">
-                    <svg
-                      className="h-5 w-5 text-green-500 mr-3"
-                      fill="none"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth="2"
-                      viewBox="0 0 24 24"
-                      stroke="currentColor"
+        {/* Status Notification */}
+        {upgradeStatus?.show && (
+          <div className={`mb-6 p-4 rounded-lg border ${
+            upgradeStatus.type === 'success' ? 'bg-green-50 border-green-200 text-green-800' :
+            upgradeStatus.type === 'error' ? 'bg-red-50 border-red-200 text-red-800' :
+            'bg-blue-50 border-blue-200 text-blue-800'
+          }`}>
+            <div className="flex justify-between items-start">
+              <div className="flex-1">
+                <p className="font-medium">{upgradeStatus.message}</p>
+                {upgradeStatus.proratedAmount && upgradeStatus.paymentOrderId && (
+                  <div className="mt-3 space-y-2">
+                    <p className="text-sm">
+                      Pay ₹{upgradeStatus.proratedAmount} now to upgrade immediately, and your new subscription will start from the next billing cycle.
+                    </p>
+                    <button
+                      onClick={() => handleProratedPayment(upgradeStatus.paymentOrderId!)}
+                      className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
                     >
-                      <path d="M5 13l4 4L19 7"></path>
-                    </svg>
-                    {feature}
-                  </li>
-                ))}
-              </ul>
-
+                      Pay ₹{upgradeStatus.proratedAmount} Now
+                    </button>
+                  </div>
+                )}
+              </div>
               <button
-                onClick={() => handleSubscribe(plan)}
-                disabled={isButtonDisabled(plan)}
-                className={`w-full py-3 px-6 rounded-lg font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                  getButtonText(plan) === 'Current Plan'
-                    ? 'bg-gray-600 text-white'
-                    : getButtonText(plan) === 'Upgrade'
-                    ? 'bg-green-600 text-white hover:bg-green-700'
-                    : getButtonText(plan) === 'Downgrade'
-                    ? 'bg-orange-600 text-white hover:bg-orange-700'
-                    : 'bg-blue-600 text-white hover:bg-blue-700'
-                }`}
+                onClick={() => setUpgradeStatus(null)}
+                className="ml-4 text-gray-400 hover:text-gray-600"
               >
-                {loading || fetchingBilling ? "Processing..." : getButtonText(plan)}
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
               </button>
             </div>
-          ))}
-        </div>
+          </div>
+        )}
 
-        <div className="mt-16 bg-white rounded-lg shadow-lg p-8">
-          <h2 className="text-2xl font-bold text-gray-900 mb-4">
-            Current Subscription Status
-          </h2>
-          <div className="bg-gray-50 rounded-lg p-6">
-            {fetchingBilling ? (
-              <div className="text-center py-4">
-                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600 mx-auto mb-2"></div>
-                <p className="text-gray-600">Loading subscription status...</p>
+        <div className="grid lg:grid-cols-2 gap-4 max-w-full">
+          {/* Left Column - Username Input & Subscription Details */}
+          <div className="space-y-4 min-w-0">
+            {/* Username Input Section */}
+            <div className="bg-white rounded-lg shadow-lg p-4">
+              <h2 className="text-lg font-bold text-gray-900 mb-3">User Information</h2>
+              <form onSubmit={handleUsernameSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Username
+                  </label>
+                  <div className="flex space-x-2">
+                    <input
+                      type="text"
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value)}
+                      onKeyPress={handleKeyPress}
+                      className="flex-1 px-4 py-2 border border-gray-300 text-black rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      placeholder="Enter your username"
+                    />
+                    <button
+                      type="submit"
+                      disabled={fetchingBilling || !username.trim()}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                    >
+                      {fetchingBilling ? 'Loading...' : 'Get Info'}
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
+
+            {/* Current Subscription Status */}
+            <div className="bg-white rounded-lg shadow-lg p-4">
+              <h2 className="text-lg font-bold text-gray-900 mb-3">
+                Current Subscription Status
+              </h2>
+              <div className="bg-gray-50 rounded-lg p-4">
+                {fetchingBilling ? (
+                  <div className="text-center py-4">
+                    <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600 mx-auto mb-2"></div>
+                    <p className="text-gray-600">Loading subscription status...</p>
+                  </div>
+                ) : userBilling?.hasSubscription && userBilling.tierEntity ? (
+                  <div className="space-y-3">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Status:</span>
+                      <span className={`font-semibold ${
+                        userBilling.tierEntity.billing?.isCancelled 
+                          ? 'text-orange-600' 
+                          : userBilling.tierEntity.billing?.razorpaySubscriptionId 
+                            ? 'text-green-600' 
+                            : 'text-red-600'
+                      }`}>
+                        {userBilling.tierEntity.billing?.isCancelled 
+                          ? 'CANCELLED' 
+                          : userBilling.tierEntity.billing?.razorpaySubscriptionId 
+                            ? 'ACTIVE' 
+                            : 'INACTIVE'}
+                      </span>
+                    </div>
+                    {userBilling.tierEntity.billing?.isCancelled && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Cancellation:</span>
+                        <span className="font-semibold text-gray-900">
+                          {userBilling.tierEntity.billing?.cancellationReason?.includes('cycle_end') ? 'At cycle end' : 'Immediate'}
+                        </span>
+                      </div>
+                    )}
+                    {userBilling.tierEntity.billing?.upgradeInProgress && (
+                      <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded">
+                        <div className="flex justify-between items-center mb-1">
+                          <span className="text-sm font-medium text-blue-800">Upgrade In Progress</span>
+                          <span className="text-xs text-blue-600">✓</span>
+                        </div>
+                        {userBilling.tierEntity.billing?.newPlanId && (
+                          <div className="text-xs text-blue-700">
+                            New plan scheduled for next billing cycle
+                          </div>
+                        )}
+                        {userBilling.tierEntity.billing?.proratedAmount && userBilling.tierEntity.billing.proratedAmount > 0 && (
+                          <div className="text-xs text-blue-700">
+                            {userBilling.tierEntity.billing?.proratedPaid 
+                              ? `Prorated payment of ₹${userBilling.tierEntity.billing.proratedAmount / 100} completed ✓`
+                              : `Prorated payment of ₹${userBilling.tierEntity.billing.proratedAmount / 100} pending`
+                            }
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {userBilling.tierEntity.billing?.proratedPaid && !userBilling.tierEntity.billing?.upgradeInProgress && (
+                      <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded">
+                        <div className="flex justify-between items-center">
+                          <span className="text-sm font-medium text-green-800">Upgrade Completed</span>
+                          <span className="text-xs text-green-600">✓</span>
+                        </div>
+                        <div className="text-xs text-green-700">
+                          You now have access to the upgraded features
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Current Plan:</span>
+                      <span className="font-semibold text-gray-900">{userBilling.tierEntity.tier}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Renewal Period:</span>
+                      <span className="font-semibold text-gray-900">{userBilling.tierEntity.billing?.renewalPeriod || 'N/A'}</span>
+                    </div>
+                    {userBilling.tierEntity.billing?.subscriptionEndDate && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Next Billing:</span>
+                        <span className="font-semibold text-gray-900">{new Date(userBilling.tierEntity.billing.subscriptionEndDate).toLocaleDateString()}</span>
+                      </div>
+                    )}
+                    {userBilling.tierEntity.billing?.razorpaySubscriptionId && (
+                      <div className="mt-3 p-3 bg-gray-100 rounded">
+                        <span className="text-sm text-gray-600">Subscription ID:</span>
+                        <div className="text-xs text-gray-800 font-mono break-all">{userBilling.tierEntity.billing.razorpaySubscriptionId}</div>
+                      </div>
+                    )}
+                    
+                    {/* Cancellation Button */}
+                    {userBilling.tierEntity.billing?.razorpaySubscriptionId && !userBilling.tierEntity.billing?.isCancelled && (
+                      <div className="mt-3 pt-3 border-t border-gray-300">
+                        <div className="text-sm text-gray-700 mb-2 font-medium">Manage Subscription</div>
+                        <button
+                          onClick={handleCancel}
+                          disabled={loading}
+                          className="w-full py-2 px-4 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
+                        >
+                          {loading ? 'Processing...' : 'Cancel Subscription'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Status:</span>
+                      <span className="font-semibold text-red-600">No active subscription</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Plan:</span>
+                      <span className="font-semibold text-gray-900">None</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Next Billing:</span>
+                      <span className="font-semibold text-gray-900">N/A</span>
+                    </div>
+                  </div>
+                )}
               </div>
-            ) : userBilling?.hasSubscription && userBilling.tierEntity ? (
-              <>
-                <p className="text-gray-700">
-                  <strong>Status:</strong> {userBilling.tierEntity.billing?.razorpaySubscriptionId ? 'ACTIVE' : 'INACTIVE'}
-                </p>
-                <p className="text-gray-700 mt-2">
-                  <strong>Current Plan:</strong> {userBilling.tierEntity.tier} {userBilling.tierEntity.tier === 'BASIC' ? '(₹999/month)' : userBilling.tierEntity.tier === 'PRO' ? '(₹2999/month)' : ''}
-                </p>
-                <p className="text-gray-700 mt-2">
-                  <strong>Renewal Period:</strong> {userBilling.tierEntity.billing?.renewalPeriod || 'N/A'}
-                </p>
-                {userBilling.tierEntity.billing?.subscriptionEndDate && (
-                  <p className="text-gray-700 mt-2">
-                    <strong>Next Billing:</strong> {new Date(userBilling.tierEntity.billing.subscriptionEndDate).toLocaleDateString()}
-                  </p>
-                )}
-                {userBilling.tierEntity.billing?.razorpaySubscriptionId && (
-                  <p className="text-gray-700 mt-2">
-                    <strong>Subscription ID:</strong> {userBilling.tierEntity.billing.razorpaySubscriptionId}
-                  </p>
-                )}
-              </>
-            ) : (
-              <>
-                <p className="text-gray-700">
-                  <strong>Status:</strong> No active subscription
-                </p>
-                <p className="text-gray-700 mt-2">
-                  <strong>Plan:</strong> None
-                </p>
-                <p className="text-gray-700 mt-2">
-                  <strong>Next Billing:</strong> N/A
-                </p>
-              </>
-            )}
+            </div>
+          </div>
+
+          {/* Right Column - Subscription Plans */}
+          <div className="min-w-0">
+            <div className="bg-white rounded-lg shadow-lg p-4">
+              <h2 className="text-lg font-bold text-gray-900 mb-3">Available Plans</h2>
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-3 max-w-full">
+                {subscriptionPlans.map((plan) => (
+                  <div
+                    key={plan.id}
+                    className="bg-gray-50 rounded-lg p-4 border border-gray-200 hover:border-blue-500 transition-colors flex flex-col"
+                  >
+                    <div className="text-center mb-4">
+                      <h3 className="text-lg font-bold text-gray-900 mb-1">
+                        {plan.name} <span className="text-sm font-normal text-gray-500">({plan.duration})</span>
+                      </h3>
+                      <div className="text-2xl font-bold text-blue-600 mb-1">
+                        ₹{plan.price}
+                        <span className="text-sm text-gray-500">/{plan.duration}</span>
+                      </div>
+                      {userBilling?.hasSubscription && userBilling.tierEntity && (
+                        <div className="text-xs text-gray-600 mt-1">
+                          {(() => {
+                            const currentTier = userBilling.tierEntity?.tier;
+                            const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
+                            const isYearly = plan.duration === 'yearly';
+                            const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
+                            
+                            if (currentTier === newTier && 
+                                ((currentRenewal === 'MONTHLY' && !isYearly) || (currentRenewal === 'ANNUAL' && isYearly))) {
+                              return "✓ Your current plan";
+                            }
+                            if (currentTier === 'BASIC' && newTier === 'PRO') {
+                              return "↗ Upgrade available";
+                            }
+                            if (currentTier === 'PRO' && newTier === 'BASIC') {
+                              return "↘ Downgrade option";
+                            }
+                            if (currentTier === newTier && currentRenewal === 'MONTHLY' && isYearly) {
+                              return "📅 Switch to yearly";
+                            }
+                            if (currentTier === newTier && currentRenewal === 'ANNUAL' && !isYearly) {
+                              return "📅 Switch to monthly";
+                            }
+                            return "";
+                          })()}
+                        </div>
+                      )}
+                    </div>
+
+                    <ul className="space-y-2 mb-4 flex-grow">
+                      {plan.features.map((feature, index) => (
+                        <li key={index} className="flex items-center text-sm text-gray-700">
+                          <svg
+                            className="h-4 w-4 text-green-500 mr-2 flex-shrink-0"
+                            fill="none"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth="2"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                          >
+                            <path d="M5 13l4 4L19 7"></path>
+                          </svg>
+                          {feature}
+                        </li>
+                      ))}
+                    </ul>
+
+                    <button
+                      onClick={() => handleSubscribe(plan)}
+                      disabled={isButtonDisabled(plan)}
+                      className={`w-full py-2 px-4 rounded-lg font-semibold text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                        getButtonText(plan) === 'Current Plan'
+                          ? 'bg-gray-600 text-white'
+                          : getButtonText(plan) === 'Upgrade' || getButtonText(plan) === 'Switch to Yearly'
+                          ? 'bg-green-600 text-white hover:bg-green-700'
+                          : getButtonText(plan) === 'Downgrade' || getButtonText(plan) === 'Switch to Monthly'
+                          ? 'bg-orange-600 text-white hover:bg-orange-700'
+                          : 'bg-blue-600 text-white hover:bg-blue-700'
+                      }`}
+                    >
+                      {loading || fetchingBilling ? "Processing..." : getButtonText(plan)}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         </div>
       </div>

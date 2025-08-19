@@ -42,6 +42,8 @@ export interface TierEntity {
     proratedOrderId?: string;
     proratedPaid?: boolean;
     proratedPaidAt?: string;
+    subscriptionTransitioned?: boolean;
+    transitionedAt?: string;
   };
   createdAt: string; // UTC ISO
   updatedAt: string; // UTC ISO

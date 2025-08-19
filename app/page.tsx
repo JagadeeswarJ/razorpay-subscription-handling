@@ -33,6 +33,8 @@ interface UserTierInfo {
       proratedOrderId?: string;
       proratedPaid?: boolean;
       proratedPaidAt?: string;
+      subscriptionTransitioned?: boolean;
+      transitionedAt?: string;
     };
     createdAt: string;
     updatedAt: string;
@@ -280,6 +282,62 @@ export default function Home() {
     window.location.href = paymentUrl;
   };
 
+  const handleSetupNewSubscription = async () => {
+    setLoading(true);
+    setUpgradeStatus(null);
+    
+    try {
+      console.log('Setting up new subscription mandate...');
+      
+      const response = await fetch('/api/setup-new-subscription', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          username: username,
+        }),
+      });
+
+      const result = await response.json();
+      
+      if (response.ok && result.success) {
+        if (result.paymentLink) {
+          setUpgradeStatus({
+            show: true,
+            message: 'Redirecting to set up UPI mandate for your new subscription...',
+            type: 'info'
+          });
+          // Redirect after a short delay to show the message
+          setTimeout(() => {
+            window.location.href = result.paymentLink;
+          }, 1000);
+        } else {
+          setUpgradeStatus({
+            show: true,
+            message: result.message || 'New subscription setup completed',
+            type: 'success'
+          });
+        }
+      } else {
+        setUpgradeStatus({
+          show: true,
+          message: result.error || 'Failed to setup new subscription',
+          type: 'error'
+        });
+      }
+    } catch (error) {
+      console.error('Setup error:', error);
+      setUpgradeStatus({
+        show: true,
+        message: 'Failed to setup new subscription. Please try again.',
+        type: 'error'
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const getButtonText = (plan: SubscriptionPlan): string => {
     if (!userBilling?.hasSubscription) return "Subscribe Now";
     
@@ -459,14 +517,32 @@ export default function Home() {
                         )}
                       </div>
                     )}
-                    {userBilling.tierEntity.billing?.proratedPaid && !userBilling.tierEntity.billing?.upgradeInProgress && (
+                    {userBilling.tierEntity.billing?.proratedPaid && !userBilling.tierEntity.billing?.subscriptionTransitioned && (
+                      <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded">
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-sm font-medium text-yellow-800">Setup Required</span>
+                          <span className="text-xs text-yellow-600">⚠</span>
+                        </div>
+                        <div className="text-xs text-yellow-700 mb-2">
+                          Please set up UPI mandate for your new subscription to continue billing from next cycle.
+                        </div>
+                        <button
+                          onClick={handleSetupNewSubscription}
+                          disabled={loading}
+                          className="text-xs bg-yellow-600 text-white px-3 py-1 rounded hover:bg-yellow-700 disabled:opacity-50"
+                        >
+                          {loading ? 'Processing...' : 'Setup UPI Mandate'}
+                        </button>
+                      </div>
+                    )}
+                    {userBilling.tierEntity.billing?.subscriptionTransitioned && (
                       <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded">
                         <div className="flex justify-between items-center">
                           <span className="text-sm font-medium text-green-800">Upgrade Completed</span>
                           <span className="text-xs text-green-600">✓</span>
                         </div>
                         <div className="text-xs text-green-700">
-                          You now have access to the upgraded features
+                          You now have access to the upgraded features with new billing cycle
                         </div>
                       </div>
                     )}

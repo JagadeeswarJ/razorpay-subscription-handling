@@ -170,17 +170,62 @@ async function handleSubscriptionActivated(subscription: any) {
     const isUpgrade = subscription.notes.isUpgrade === 'true';
 
     if (planDetails) {
-      // For upgrades, we might want different logic
+      // For upgrades, handle the transition differently
       if (isUpgrade) {
         console.log('Processing upgrade subscription activation for:', userId);
         
-        // Ensure old subscription is marked as cancelled
-        await cancelUserSubscription(userId, 'upgrade_completed');
+        // Get current user tier to update existing record
+        const currentTier = await getUserTier(userId);
+        if (currentTier && currentTier.billing?.newSubscriptionId === subscription.id) {
+          // This is the new subscription being activated - update existing tier record
+          const nextBillingDate = new Date();
+          if (planDetails.renewalPeriod === 'ANNUAL') {
+            nextBillingDate.setFullYear(nextBillingDate.getFullYear() + 1);
+          } else {
+            nextBillingDate.setMonth(nextBillingDate.getMonth() + 1);
+          }
+
+          // Cancel old subscription first
+          if (currentTier.billing?.razorpaySubscriptionId && 
+              currentTier.billing.razorpaySubscriptionId !== subscription.id) {
+            try {
+              const razorpay = new (await import('razorpay')).default({
+                key_id: process.env.RAZORPAY_ID!,
+                key_secret: process.env.RAZORPAY_SECRET!,
+              });
+              await razorpay.subscriptions.cancel(currentTier.billing.razorpaySubscriptionId, true);
+              console.log('Old subscription cancelled:', currentTier.billing.razorpaySubscriptionId);
+            } catch (error) {
+              console.error('Failed to cancel old subscription:', error);
+            }
+          }
+
+          // Update existing tier with new subscription details
+          await updateUserTier(userId, {
+            tier: planDetails.tier,
+            'billing.razorpaySubscriptionId': subscription.id,
+            'billing.subscriptionStartDate': new Date().toISOString(),
+            'billing.subscriptionEndDate': nextBillingDate.toISOString(),
+            'billing.renewalPeriod': planDetails.renewalPeriod,
+            'billing.upgradeInProgress': false,
+            'billing.newSubscriptionId': null,
+            'billing.newPlanId': null,
+            'billing.subscriptionTransitioned': true,
+            'billing.transitionedAt': new Date().toISOString(),
+          });
+          
+          console.log(`Upgrade subscription activated and transitioned for user:`, userId);
+          return;
+        }
       }
       
-      // Calculate next billing date (monthly)
+      // Handle new subscription (not upgrade)
       const nextBillingDate = new Date();
-      nextBillingDate.setMonth(nextBillingDate.getMonth() + 1);
+      if (planDetails.renewalPeriod === 'ANNUAL') {
+        nextBillingDate.setFullYear(nextBillingDate.getFullYear() + 1);
+      } else {
+        nextBillingDate.setMonth(nextBillingDate.getMonth() + 1);
+      }
 
       await createUserTier({
         entityType: "Tier",
@@ -196,7 +241,7 @@ async function handleSubscriptionActivated(subscription: any) {
         },
       });
       
-      console.log(`${isUpgrade ? 'Upgrade' : 'New'} subscription activated for user:`, userId);
+      console.log(`New subscription activated for user:`, userId);
     }
   }
 }

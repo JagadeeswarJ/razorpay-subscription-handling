@@ -35,6 +35,12 @@ interface UserTierInfo {
       proratedPaidAt?: string;
       subscriptionTransitioned?: boolean;
       transitionedAt?: string;
+      mandateAuthenticated?: boolean;
+      mandateAuthenticatedAt?: string;
+      paymentFailed?: boolean;
+      paymentFailedAt?: string;
+      subscriptionHalted?: boolean;
+      haltedAt?: string;
     };
     createdAt: string;
     updatedAt: string;
@@ -346,7 +352,12 @@ export default function Home() {
     const isYearly = plan.duration === 'yearly';
     const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
     
-    if (!userBilling.tierEntity?.billing?.razorpaySubscriptionId) return "Subscribe Now";
+    const isActiveSubscription = userBilling?.tierEntity?.billing?.subscriptionTransitioned && 
+                                  userBilling?.tierEntity?.billing?.mandateAuthenticated &&
+                                  !userBilling?.tierEntity?.billing?.subscriptionHalted &&
+                                  !userBilling?.tierEntity?.billing?.isCancelled;
+    
+    if (!isActiveSubscription) return "Subscribe Now";
     
     // Check if same tier and period
     if (currentTier === newTier && 
@@ -375,11 +386,15 @@ export default function Home() {
     const isYearly = plan.duration === 'yearly';
     const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
     
-    // Disable if it's the current plan or if subscription is cancelled
-    return !!userBilling.tierEntity?.billing?.razorpaySubscriptionId && 
-           (userBilling.tierEntity?.billing?.isCancelled ||
+    const isActiveSubscription = userBilling?.tierEntity?.billing?.subscriptionTransitioned && 
+                                  userBilling?.tierEntity?.billing?.mandateAuthenticated &&
+                                  !userBilling?.tierEntity?.billing?.subscriptionHalted &&
+                                  !userBilling?.tierEntity?.billing?.isCancelled;
+    
+    // Disable if it's the current plan or if subscription is not active
+    return isActiveSubscription && 
            (currentTier === newTier &&
-           ((currentRenewal === 'MONTHLY' && !isYearly) || (currentRenewal === 'ANNUAL' && isYearly))));
+           ((currentRenewal === 'MONTHLY' && !isYearly) || (currentRenewal === 'ANNUAL' && isYearly)));
   };
 
   return (
@@ -476,16 +491,24 @@ export default function Home() {
                       <span className="text-gray-600">Status:</span>
                       <span className={`font-semibold ${
                         userBilling.tierEntity.billing?.isCancelled 
-                          ? 'text-orange-600' 
-                          : userBilling.tierEntity.billing?.razorpaySubscriptionId 
+                          ? 'text-orange-600'
+                          : userBilling.tierEntity.billing?.subscriptionHalted
+                            ? 'text-red-600'
+                          : userBilling.tierEntity.billing?.subscriptionTransitioned && userBilling.tierEntity.billing?.mandateAuthenticated
                             ? 'text-green-600' 
-                            : 'text-red-600'
+                            : userBilling.tierEntity.billing?.paymentFailed
+                              ? 'text-yellow-600'
+                              : 'text-red-600'
                       }`}>
                         {userBilling.tierEntity.billing?.isCancelled 
                           ? 'CANCELLED' 
-                          : userBilling.tierEntity.billing?.razorpaySubscriptionId 
+                          : userBilling.tierEntity.billing?.subscriptionHalted
+                            ? 'HALTED'
+                          : userBilling.tierEntity.billing?.subscriptionTransitioned && userBilling.tierEntity.billing?.mandateAuthenticated
                             ? 'ACTIVE' 
-                            : 'INACTIVE'}
+                            : userBilling.tierEntity.billing?.paymentFailed
+                              ? 'PAYMENT FAILED'
+                              : 'INACTIVE'}
                       </span>
                     </div>
                     {userBilling.tierEntity.billing?.isCancelled && (
@@ -528,6 +551,38 @@ export default function Home() {
                         </div>
                       </div>
                     )}
+                    {userBilling.tierEntity.billing?.paymentFailed && (
+                      <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded">
+                        <div className="flex justify-between items-center mb-1">
+                          <span className="text-sm font-medium text-yellow-800">Payment Failed</span>
+                          <span className="text-xs text-yellow-600">⚠</span>
+                        </div>
+                        <div className="text-xs text-yellow-700">
+                          Your payment failed. Please update your payment method or your subscription may be cancelled.
+                        </div>
+                        {userBilling.tierEntity.billing?.paymentFailedAt && (
+                          <div className="text-xs text-yellow-600 mt-1">
+                            Failed: {new Date(userBilling.tierEntity.billing.paymentFailedAt).toLocaleDateString()}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {userBilling.tierEntity.billing?.subscriptionHalted && (
+                      <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded">
+                        <div className="flex justify-between items-center mb-1">
+                          <span className="text-sm font-medium text-red-800">Subscription Halted</span>
+                          <span className="text-xs text-red-600">✕</span>
+                        </div>
+                        <div className="text-xs text-red-700">
+                          Your subscription has been halted due to failed payments. You now have free tier access.
+                        </div>
+                        {userBilling.tierEntity.billing?.haltedAt && (
+                          <div className="text-xs text-red-600 mt-1">
+                            Halted: {new Date(userBilling.tierEntity.billing.haltedAt).toLocaleDateString()}
+                          </div>
+                        )}
+                      </div>
+                    )}
                     <div className="flex justify-between">
                       <span className="text-gray-600">Current Plan:</span>
                       <span className="font-semibold text-gray-900">{userBilling.tierEntity.tier}</span>
@@ -550,7 +605,10 @@ export default function Home() {
                     )}
                     
                     {/* Cancellation Button */}
-                    {userBilling.tierEntity.billing?.razorpaySubscriptionId && !userBilling.tierEntity.billing?.isCancelled && (
+                    {userBilling.tierEntity.billing?.subscriptionTransitioned && 
+                     userBilling.tierEntity.billing?.mandateAuthenticated &&
+                     !userBilling.tierEntity.billing?.subscriptionHalted &&
+                     !userBilling.tierEntity.billing?.isCancelled && (
                       <div className="mt-3 pt-3 border-t border-gray-300">
                         <div className="text-sm text-gray-700 mb-2 font-medium">Manage Subscription</div>
                         <button

@@ -46,6 +46,10 @@ export interface TierEntity {
     transitionedAt?: string;
     mandateAuthenticated?: boolean;
     mandateAuthenticatedAt?: string;
+    paymentFailed?: boolean;
+    paymentFailedAt?: string;
+    subscriptionHalted?: boolean;
+    haltedAt?: string;
   };
   createdAt: string; // UTC ISO
   updatedAt: string; // UTC ISO

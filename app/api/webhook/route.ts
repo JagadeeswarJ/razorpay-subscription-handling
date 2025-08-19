@@ -66,7 +66,7 @@ export async function POST(request: NextRequest) {
         break;
 
       case 'payment.failed':
-        console.log('Payment failed:', event.payload.payment.entity);
+        await handlePaymentFailed(event.payload.payment.entity);
         break;
         
       case 'refund.created':
@@ -99,6 +99,10 @@ export async function POST(request: NextRequest) {
 
       case 'subscription.completed':
         await handleSubscriptionCompleted(event.payload.subscription.entity);
+        break;
+
+      case 'subscription.halted':
+        await handleSubscriptionHalted(event.payload.subscription.entity);
         break;
 
       default:
@@ -169,7 +173,7 @@ async function handleSubscriptionAuthenticated(subscription: any) {
               key_secret: process.env.RAZORPAY_SECRET!,
             });
             
-            await razorpay.subscriptions.cancel(currentTier.billing.razorpaySubscriptionId, true);
+            await razorpay.subscriptions.cancel(currentTier.billing.razorpaySubscriptionId, false);
             console.log('Old subscription cancelled during mandate setup:', currentTier.billing.razorpaySubscriptionId);
             
             // Update user tier to reflect the transition
@@ -374,6 +378,37 @@ async function handleSubscriptionCompleted(subscription: any) {
       'billing.subscriptionEndDate': FieldValue.delete(),
       tier: 'NONE',
     });
+  }
+}
+
+async function handlePaymentFailed(payment: any) {
+  console.log('Payment failed:', payment);
+  
+  if (payment.notes && payment.notes.userId) {
+    const userId = payment.notes.userId.replace('USER#', '');
+    // Mark as payment failed but keep grace period
+    await updateUserTier(userId, {
+      'billing.paymentFailed': true,
+      'billing.paymentFailedAt': new Date().toISOString(),
+    });
+    
+    console.log('Payment failure recorded for user:', userId);
+  }
+}
+
+async function handleSubscriptionHalted(subscription: any) {
+  console.log('Subscription halted:', subscription);
+  
+  if (subscription.notes && subscription.notes.userId) {
+    const userId = subscription.notes.userId.replace('USER#', '');
+    // Downgrade to free tier when subscription is halted
+    await updateUserTier(userId, {
+      tier: 'NONE',
+      'billing.subscriptionHalted': true,
+      'billing.haltedAt': new Date().toISOString(),
+    });
+    
+    console.log('User downgraded to free tier due to subscription halt:', userId);
   }
 }
 

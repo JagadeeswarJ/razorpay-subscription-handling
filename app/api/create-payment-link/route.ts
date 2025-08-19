@@ -257,7 +257,7 @@ async function handleProratedPayment(username: string, orderId: string) {
         username: username,
         type: 'prorated_upgrade',
       },
-      callback_url: `${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/`,
+      callback_url: `${process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000'}/setup-mandate?username=${username}&proratedAmount=${orderResponse.amount / 100}`,
       callback_method: 'get',
     };
 

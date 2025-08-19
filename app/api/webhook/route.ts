@@ -148,12 +148,52 @@ async function handleSubscriptionAuthenticated(subscription: any) {
   console.log('Subscription authenticated (UPI mandate created):', subscription);
   
   // This event is fired when UPI mandate is successfully created
-  // We can use this to track when the mandate is ready for billing
   if (subscription.notes && subscription.notes.userId) {
     const userId = subscription.notes.userId.replace('USER#', '');
-    console.log('UPI mandate authenticated for user:', userId);
+    const isUpgrade = subscription.notes.isUpgrade === 'true';
     
-    // Optionally update user tier with mandate status
+    console.log('UPI mandate authenticated for user:', userId, 'isUpgrade:', isUpgrade);
+    
+    // If this is an upgrade subscription, cancel the old one immediately
+    if (isUpgrade) {
+      const currentTier = await getUserTier(userId);
+      if (currentTier && currentTier.billing?.newSubscriptionId === subscription.id) {
+        console.log('Processing upgrade mandate authentication for user:', userId);
+        
+        // Cancel old subscription immediately
+        if (currentTier.billing?.razorpaySubscriptionId && 
+            currentTier.billing.razorpaySubscriptionId !== subscription.id) {
+          try {
+            const razorpay = new (await import('razorpay')).default({
+              key_id: process.env.RAZORPAY_ID!,
+              key_secret: process.env.RAZORPAY_SECRET!,
+            });
+            
+            await razorpay.subscriptions.cancel(currentTier.billing.razorpaySubscriptionId, true);
+            console.log('Old subscription cancelled during mandate setup:', currentTier.billing.razorpaySubscriptionId);
+            
+            // Update user tier to reflect the transition
+            await updateUserTier(userId, {
+              'billing.razorpaySubscriptionId': subscription.id,
+              'billing.newSubscriptionId': null,
+              'billing.newPlanId': null,
+              'billing.upgradeInProgress': false,
+              'billing.subscriptionTransitioned': true,
+              'billing.transitionedAt': new Date().toISOString(),
+              'billing.mandateAuthenticated': true,
+              'billing.mandateAuthenticatedAt': new Date().toISOString(),
+            });
+            
+            console.log('Subscription transition completed during mandate authentication for user:', userId);
+            return;
+          } catch (error) {
+            console.error('Failed to cancel old subscription during mandate setup:', error);
+          }
+        }
+      }
+    }
+    
+    // Regular mandate authentication
     await updateUserTier(userId, {
       'billing.mandateAuthenticated': true,
       'billing.mandateAuthenticatedAt': new Date().toISOString(),

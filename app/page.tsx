@@ -517,24 +517,6 @@ export default function Home() {
                         )}
                       </div>
                     )}
-                    {userBilling.tierEntity.billing?.proratedPaid && !userBilling.tierEntity.billing?.subscriptionTransitioned && (
-                      <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded">
-                        <div className="flex justify-between items-center mb-2">
-                          <span className="text-sm font-medium text-yellow-800">Setup Required</span>
-                          <span className="text-xs text-yellow-600">⚠</span>
-                        </div>
-                        <div className="text-xs text-yellow-700 mb-2">
-                          Please set up UPI mandate for your new subscription to continue billing from next cycle.
-                        </div>
-                        <button
-                          onClick={handleSetupNewSubscription}
-                          disabled={loading}
-                          className="text-xs bg-yellow-600 text-white px-3 py-1 rounded hover:bg-yellow-700 disabled:opacity-50"
-                        >
-                          {loading ? 'Processing...' : 'Setup UPI Mandate'}
-                        </button>
-                      </div>
-                    )}
                     {userBilling.tierEntity.billing?.subscriptionTransitioned && (
                       <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded">
                         <div className="flex justify-between items-center">

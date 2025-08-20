@@ -540,116 +540,44 @@ export default function Home() {
                 {fetchingBilling ? (
                   <div className="text-center py-4">
                     <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600 mx-auto mb-2"></div>
-                    <p className="text-gray-600">Loading subscription status...</p>
+                    <p className="text-gray-600">Loading...</p>
                   </div>
-                ) : userBilling?.hasSubscription && userBilling.tierEntity ? (
+                ) : (
                   <div className="space-y-3">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Username:</span>
+                      <span className="font-semibold text-gray-900">{userBilling?.username || username}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">Tier:</span>
+                      <span className="font-semibold text-gray-900">{userBilling?.tierEntity?.tier || 'NONE'}</span>
+                    </div>
                     <div className="flex justify-between">
                       <span className="text-gray-600">Status:</span>
                       <span className={`font-semibold ${
-                        userBilling.tierEntity.billing?.status === 'ACTIVE' 
+                        userBilling?.tierEntity?.billing?.status === 'ACTIVE' 
                           ? 'text-green-600'
-                          : userBilling.tierEntity.billing?.status === 'CANCELLED'
+                          : userBilling?.tierEntity?.billing?.status === 'CANCELLED'
                             ? 'text-orange-600'
-                          : userBilling.tierEntity.billing?.status === 'HALTED'
+                          : userBilling?.tierEntity?.billing?.status === 'HALTED'
                             ? 'text-red-600'
                             : 'text-gray-600'
                       }`}>
-                        {userBilling.tierEntity.billing?.status || 'UNKNOWN'}
+                        {userBilling?.tierEntity?.billing?.status || 'INACTIVE'}
                       </span>
                     </div>
-                    {userBilling.tierEntity.billing?.status === 'CANCELLED' && (
-                      <div className="flex justify-between">
-                        <span className="text-gray-600">Cancellation:</span>
-                        <span className="font-semibold text-gray-900">
-                          {userBilling.tierEntity.billing?.statusReason || 'Cancelled'}
-                        </span>
-                      </div>
-                    )}
-                    {userBilling.tierEntity.billing?.upgradeInProgress && (
-                      <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded">
-                        <div className="flex justify-between items-center mb-1">
-                          <span className="text-sm font-medium text-blue-800">Upgrade In Progress</span>
-                          <span className="text-xs text-blue-600">✓</span>
-                        </div>
-                        {userBilling.tierEntity.billing?.targetPlanId && (
-                          <div className="text-xs text-blue-700">
-                            New plan scheduled for next billing cycle
-                          </div>
-                        )}
-                        <div className="text-xs text-blue-700">
-                          Upgrade will be active from next billing cycle
-                        </div>
-                      </div>
-                    )}
-                    {userBilling.tierEntity.billing?.status === 'ACTIVE' && (
-                      <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded">
-                        <div className="flex justify-between items-center">
-                          <span className="text-sm font-medium text-green-800">Upgrade Completed</span>
-                          <span className="text-xs text-green-600">✓</span>
-                        </div>
-                        <div className="text-xs text-green-700">
-                          You now have access to the upgraded features with new billing cycle
-                        </div>
-                      </div>
-                    )}
-                    {userBilling.tierEntity.billing?.lastPaymentStatus === 'FAILED' && (
-                      <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded">
-                        <div className="flex justify-between items-center mb-1">
-                          <span className="text-sm font-medium text-yellow-800">Payment Failed</span>
-                          <span className="text-xs text-yellow-600">⚠</span>
-                        </div>
-                        <div className="text-xs text-yellow-700">
-                          Your payment failed. Please update your payment method or your subscription may be cancelled.
-                        </div>
-                        {userBilling.tierEntity.billing?.lastPaymentAt && (
-                          <div className="text-xs text-yellow-600 mt-1">
-                            Failed: {new Date(userBilling.tierEntity.billing.lastPaymentAt).toLocaleDateString()}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    {userBilling.tierEntity.billing?.status === 'HALTED' && (
-                      <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded">
-                        <div className="flex justify-between items-center mb-1">
-                          <span className="text-sm font-medium text-red-800">Subscription Halted</span>
-                          <span className="text-xs text-red-600">✕</span>
-                        </div>
-                        <div className="text-xs text-red-700">
-                          Your subscription has been halted due to failed payments. You now have free tier access.
-                        </div>
-                        {userBilling.tierEntity.billing?.statusChangedAt && (
-                          <div className="text-xs text-red-600 mt-1">
-                            Halted: {new Date(userBilling.tierEntity.billing.statusChangedAt).toLocaleDateString()}
-                          </div>
-                        )}
-                      </div>
-                    )}
                     <div className="flex justify-between">
-                      <span className="text-gray-600">Current Plan:</span>
-                      <span className="font-semibold text-gray-900">{userBilling.tierEntity.tier}</span>
+                      <span className="text-gray-600">Next Billing:</span>
+                      <span className="font-semibold text-gray-900">
+                        {userBilling?.tierEntity?.billing?.currentPeriodEnd 
+                          ? new Date(userBilling.tierEntity.billing.currentPeriodEnd).toLocaleDateString()
+                          : 'N/A'}
+                      </span>
                     </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Renewal Period:</span>
-                      <span className="font-semibold text-gray-900">{userBilling.tierEntity.billing?.renewalPeriod || 'N/A'}</span>
-                    </div>
-                    {userBilling.tierEntity.billing?.currentPeriodEnd && (
-                      <div className="flex justify-between">
-                        <span className="text-gray-600">Next Billing:</span>
-                        <span className="font-semibold text-gray-900">{new Date(userBilling.tierEntity.billing.currentPeriodEnd).toLocaleDateString()}</span>
-                      </div>
-                    )}
-                    {userBilling.tierEntity.billing?.razorpaySubscriptionId && (
-                      <div className="mt-3 p-3 bg-gray-100 rounded">
-                        <span className="text-sm text-gray-600">Subscription ID:</span>
-                        <div className="text-xs text-gray-800 font-mono break-all">{userBilling.tierEntity.billing.razorpaySubscriptionId}</div>
-                      </div>
-                    )}
                     
                     {/* Cancellation Button */}
-                    {userBilling.tierEntity.billing?.status === 'ACTIVE' && (
+                    {userBilling?.tierEntity?.billing?.status === 'ACTIVE' && (
                       <div className="mt-3 pt-3 border-t border-gray-300">
-                        <div className="text-sm text-gray-700 mb-2 font-medium">Manage Subscription</div>
                         <button
                           onClick={handleCancel}
                           disabled={loading}
@@ -659,21 +587,6 @@ export default function Home() {
                         </button>
                       </div>
                     )}
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Status:</span>
-                      <span className="font-semibold text-red-600">No active subscription</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Plan:</span>
-                      <span className="font-semibold text-gray-900">None</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Next Billing:</span>
-                      <span className="font-semibold text-gray-900">N/A</span>
-                    </div>
                   </div>
                 )}
               </div>

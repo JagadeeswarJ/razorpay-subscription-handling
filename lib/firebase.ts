@@ -37,6 +37,9 @@ export interface UserTierInfo {
       razorpaySubscriptionId?: string;
       razorpayCustomerId?: string;
 
+      // Payment method from subscription authenticated event
+      payment_method?: 'upi' | 'card' | 'netbanking' | 'wallet' | null;
+
       // Payment state
       lastPaymentStatus?: "PAID" | "FAILED" | "PENDING";
       lastPaymentAt?: string | null;
@@ -68,6 +71,7 @@ export interface TierEntity {
     currentPeriodEnd?: string | null;
     razorpaySubscriptionId?: string;
     razorpayCustomerId?: string;
+    payment_method?: 'upi' | 'card' | 'netbanking' | 'wallet' | null;
     lastPaymentStatus?: "PAID" | "FAILED" | "PENDING";
     lastPaymentAt?: string | null;
     status?: "ACTIVE" | "HALTED" | "CANCELLED";
@@ -221,6 +225,9 @@ export const getUserBilling = async (userId: string): Promise<UserTierInfo | nul
           
           razorpaySubscriptionId: tierData.billing.razorpaySubscriptionId,
           razorpayCustomerId: tierData.billing.razorpayCustomerId,
+          
+          // Payment method
+          payment_method: tierData.billing.payment_method,
           
           // Map payment status
           lastPaymentStatus: tierData.billing.paymentFailed 

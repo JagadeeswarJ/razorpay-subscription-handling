@@ -156,7 +156,10 @@ async function handleSubscriptionAuthenticated(subscription: any) {
     const userId = subscription.notes.userId.replace('USER#', '');
     const isUpgrade = subscription.notes.isUpgrade === 'true';
     
-    console.log('UPI mandate authenticated for user:', userId, 'isUpgrade:', isUpgrade);
+    // Extract payment method from subscription object
+    const paymentMethod = subscription.payment_method as 'upi' | 'card' | 'netbanking' | 'wallet' | null;
+    
+    console.log('UPI mandate authenticated for user:', userId, 'isUpgrade:', isUpgrade, 'payment_method:', paymentMethod);
     
     // If this is an upgrade subscription, cancel the old one immediately
     if (isUpgrade) {
@@ -179,6 +182,7 @@ async function handleSubscriptionAuthenticated(subscription: any) {
             // Update user tier to reflect the transition
             await updateUserTier(userId, {
               'billing.razorpaySubscriptionId': subscription.id,
+              'billing.payment_method': paymentMethod,
               'billing.newSubscriptionId': null,
               'billing.newPlanId': null,
               'billing.upgradeInProgress': false,
@@ -197,11 +201,27 @@ async function handleSubscriptionAuthenticated(subscription: any) {
       }
     }
     
-    // Regular mandate authentication
-    await updateUserTier(userId, {
-      'billing.mandateAuthenticated': true,
-      'billing.mandateAuthenticatedAt': new Date().toISOString(),
-    });
+    // Regular mandate authentication - try to find and update user tier
+    try {
+      const currentTier = await getUserTier(userId);
+      if (currentTier) {
+        console.log('Found user tier for payment method update:', currentTier.id);
+        await updateUserTier(userId, {
+          'billing.payment_method': paymentMethod,
+          'billing.mandateAuthenticated': true,
+          'billing.mandateAuthenticatedAt': new Date().toISOString(),
+        });
+        console.log('Payment method updated successfully for user:', userId);
+      } else {
+        console.error('No user tier found for userId:', userId, '- Cannot update payment method');
+        // Don't fail the webhook - the subscription.activated event will create the user tier
+      }
+    } catch (error) {
+      console.error('Error updating payment method for user:', userId, error);
+      // Don't fail the webhook - continue processing
+    }
+  } else {
+    console.log('No userId found in subscription notes for subscription:', subscription.id);
   }
 }
 
@@ -251,6 +271,7 @@ async function handleSubscriptionActivated(subscription: any) {
             'billing.currentPeriodStart': new Date().toISOString(),
             'billing.currentPeriodEnd': nextBillingDate.toISOString(),
             'billing.renewalPeriod': planDetails.renewalPeriod,
+            'billing.payment_method': subscription.payment_method,
             'billing.status': 'ACTIVE',
             'billing.lastPaymentStatus': 'PAID',
             'billing.lastPaymentAt': new Date().toISOString(),
@@ -288,6 +309,7 @@ async function handleSubscriptionActivated(subscription: any) {
           currentPeriodStart: new Date().toISOString(),
           currentPeriodEnd: nextBillingDate.toISOString(),
           razorpaySubscriptionId: subscription.id,
+          payment_method: subscription.payment_method as 'upi' | 'card' | 'netbanking' | 'wallet' | null,
           status: 'ACTIVE',
           lastPaymentStatus: 'PAID',
           lastPaymentAt: new Date().toISOString(),

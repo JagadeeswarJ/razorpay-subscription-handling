@@ -30,6 +30,9 @@ interface UserTierInfo {
       razorpaySubscriptionId?: string;
       razorpayCustomerId?: string;
 
+      // Payment method from subscription authenticated event
+      payment_method?: 'upi' | 'card' | 'netbanking' | 'wallet' | null;
+
       // Payment state
       lastPaymentStatus?: "PAID" | "FAILED" | "PENDING";
       lastPaymentAt?: string | null;
@@ -61,6 +64,7 @@ export default function Home() {
     type: 'success' | 'error' | 'info';
     proratedAmount?: number;
     paymentOrderId?: string;
+    checkoutUrl?: string;
   } | null>(null);
 
   const subscriptionPlans: SubscriptionPlan[] = [
@@ -137,15 +141,21 @@ export default function Home() {
   const handleSubscribe = async (plan: SubscriptionPlan) => {
     console.log('Handling subscription for plan:', plan.id);
 
-    // Check if user has active subscription and this is an upgrade
+    // Check if user has active subscription and this is an upgrade or downgrade
     if (userBilling?.hasSubscription && userBilling.tierEntity?.billing?.razorpaySubscriptionId) {
       const currentTier = userBilling.tierEntity.tier;
       const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
       
       if (currentTier !== newTier && (currentTier === 'BASIC' || currentTier === 'PRO')) {
-        // This is an upgrade - handle via upgrade API
-        await handleUpgrade(plan);
-        return;
+        if (currentTier === 'BASIC' && newTier === 'PRO') {
+          // This is an upgrade - handle via upgrade API
+          await handleUpgrade(plan);
+          return;
+        } else if (currentTier === 'PRO' && newTier === 'BASIC') {
+          // This is a downgrade - handle via downgrade API
+          await handleDowngrade(plan);
+          return;
+        }
       }
     }
 
@@ -193,10 +203,18 @@ export default function Home() {
             proratedAmount: result.proratedAmount,
             paymentOrderId: result.proratedPayment.orderId
           });
+        } else if (result.checkoutUrl && result.requiresAuthentication) {
+          // UPI upgrade with checkout URL for mandate authentication
+          setUpgradeStatus({
+            show: true,
+            message: result.message || 'UPI upgrade initiated! Click below to complete mandate setup.',
+            type: 'info',
+            checkoutUrl: result.checkoutUrl
+          });
         } else {
           setUpgradeStatus({
             show: true,
-            message: result.message || 'Upgrade scheduled for next billing cycle!',
+            message: result.message || 'Upgrade completed successfully!',
             type: 'success'
           });
         }
@@ -213,6 +231,62 @@ export default function Home() {
       setUpgradeStatus({
         show: true,
         message: 'Failed to upgrade subscription. Please try again.',
+        type: 'error'
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDowngrade = async (plan: SubscriptionPlan) => {
+    if (!userBilling?.tierEntity?.billing?.razorpaySubscriptionId) {
+      setUpgradeStatus({
+        show: true,
+        message: 'No active subscription found',
+        type: 'error'
+      });
+      return;
+    }
+
+    setLoading(true);
+    setUpgradeStatus(null);
+    
+    try {
+      console.log('Processing downgrade...');
+      
+      const response = await fetch('/api/downgrade-subscription', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          username: username,
+          newPlanId: plan.razorpayPlanId,
+          currentSubscriptionId: userBilling.tierEntity.billing.razorpaySubscriptionId,
+        }),
+      });
+
+      const result = await response.json();
+      
+      if (response.ok && result.success) {
+        setUpgradeStatus({
+          show: true,
+          message: result.message || 'Downgrade processed successfully!',
+          type: 'success'
+        });
+        await fetchUserBilling(username);
+      } else {
+        setUpgradeStatus({
+          show: true,
+          message: result.error || 'Failed to downgrade subscription',
+          type: 'error'
+        });
+      }
+    } catch (error) {
+      console.error('Downgrade error:', error);
+      setUpgradeStatus({
+        show: true,
+        message: 'Failed to downgrade subscription. Please try again.',
         type: 'error'
       });
     } finally {
@@ -450,6 +524,28 @@ export default function Home() {
                 </div>
               </>
             )}
+            
+            {userBilling?.tierEntity?.billing?.payment_method && (
+              <>
+                <div className="w-px h-6 bg-gray-300"></div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-gray-600">Payment:</span>
+                  <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                    userBilling?.tierEntity?.billing?.payment_method === 'upi' 
+                      ? 'bg-orange-100 text-orange-700' 
+                      : userBilling?.tierEntity?.billing?.payment_method === 'card'
+                        ? 'bg-blue-100 text-blue-700'
+                        : userBilling?.tierEntity?.billing?.payment_method === 'netbanking'
+                          ? 'bg-green-100 text-green-700'
+                          : userBilling?.tierEntity?.billing?.payment_method === 'wallet'
+                            ? 'bg-purple-100 text-purple-700'
+                            : 'bg-gray-100 text-gray-700'
+                  }`}>
+                    {userBilling?.tierEntity?.billing?.payment_method?.toUpperCase()}
+                  </span>
+                </div>
+              </>
+            )}
           </div>
           
           {userBilling?.tierEntity?.billing?.upgradeInProgress && (
@@ -483,6 +579,19 @@ export default function Home() {
                       className="inline-flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
                     >
                       Pay ₹{upgradeStatus.proratedAmount} Now
+                    </button>
+                  </div>
+                )}
+                {upgradeStatus.checkoutUrl && (
+                  <div className="mt-3 space-y-2">
+                    <p className="text-sm">
+                      Complete UPI mandate setup to activate your upgraded subscription.
+                    </p>
+                    <button
+                      onClick={() => window.open(upgradeStatus.checkoutUrl, '_blank')}
+                      className="inline-flex items-center px-4 py-2 bg-orange-600 text-white text-sm font-medium rounded-lg hover:bg-orange-700 transition-colors"
+                    >
+                      🔐 Setup UPI Mandate
                     </button>
                   </div>
                 )}
@@ -574,6 +683,25 @@ export default function Home() {
                           : 'N/A'}
                       </span>
                     </div>
+                    
+                    {userBilling?.tierEntity?.billing?.payment_method && (
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Payment Method:</span>
+                        <span className={`font-semibold ${
+                          userBilling?.tierEntity?.billing?.payment_method === 'upi' 
+                            ? 'text-orange-600' 
+                            : userBilling?.tierEntity?.billing?.payment_method === 'card'
+                              ? 'text-blue-600'
+                              : userBilling?.tierEntity?.billing?.payment_method === 'netbanking'
+                                ? 'text-green-600'
+                                : userBilling?.tierEntity?.billing?.payment_method === 'wallet'
+                                  ? 'text-purple-600'
+                                  : 'text-gray-600'
+                        }`}>
+                          {userBilling?.tierEntity?.billing?.payment_method?.toUpperCase()}
+                        </span>
+                      </div>
+                    )}
                     
                     {/* Cancellation Button */}
                     {userBilling?.tierEntity?.billing?.status === 'ACTIVE' && (

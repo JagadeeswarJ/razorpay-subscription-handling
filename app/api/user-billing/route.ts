@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getUserTier } from '@/lib/firebase';
+import { getUserBilling } from '@/lib/firebase';
 
 export async function GET(request: NextRequest) {
   try {
@@ -15,51 +15,19 @@ export async function GET(request: NextRequest) {
 
     console.log('Fetching billing status for username:', username);
 
-    const userTier = await getUserTier(username);
+    const userBilling = await getUserBilling(username);
 
-    if (!userTier) {
+    if (!userBilling) {
       return NextResponse.json({
         hasSubscription: false,
         username: username,
-        message: 'No active subscription found'
+        message: 'Error fetching user billing information'
       });
     }
 
-    console.log('Found user tier:', userTier);
+    console.log('Found user billing:', userBilling);
 
-    return NextResponse.json({
-      hasSubscription: true,
-      username: username,
-      tierEntity: {
-        tier: userTier.tier,
-        billing: userTier.billing ? {
-          renewalPeriod: userTier.billing.renewalPeriod,
-          subscriptionStartDate: userTier.billing.subscriptionStartDate,
-          subscriptionEndDate: userTier.billing.subscriptionEndDate,
-          razorpaySubscriptionId: userTier.billing.razorpaySubscriptionId,
-          razorpayCustomerId: userTier.billing.razorpayCustomerId,
-          subscriptionTransitioned: userTier.billing.subscriptionTransitioned,
-          mandateAuthenticated: userTier.billing.mandateAuthenticated,
-          upgradeInProgress: userTier.billing.upgradeInProgress,
-          isCancelled: userTier.billing.isCancelled,
-          cancellationReason: userTier.billing.cancellationReason,
-          cancelledAt: userTier.billing.cancelledAt,
-          newPlanId: userTier.billing.newPlanId,
-          newSubscriptionId: userTier.billing.newSubscriptionId,
-          proratedAmount: userTier.billing.proratedAmount,
-          proratedOrderId: userTier.billing.proratedOrderId,
-          proratedPaid: userTier.billing.proratedPaid,
-          proratedPaidAt: userTier.billing.proratedPaidAt,
-          transitionedAt: userTier.billing.transitionedAt,
-          paymentFailed: userTier.billing.paymentFailed,
-          paymentFailedAt: userTier.billing.paymentFailedAt,
-          subscriptionHalted: userTier.billing.subscriptionHalted,
-          haltedAt: userTier.billing.haltedAt,
-        } : undefined,
-        createdAt: userTier.createdAt,
-        updatedAt: userTier.updatedAt,
-      }
-    });
+    return NextResponse.json(userBilling);
   } catch (error) {
     console.error('Error fetching user billing:', error);
     return NextResponse.json(

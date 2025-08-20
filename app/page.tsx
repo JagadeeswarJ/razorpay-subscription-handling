@@ -13,35 +13,38 @@ interface SubscriptionPlan {
 }
 
 interface UserTierInfo {
-  hasSubscription: boolean;
   username: string;
+  hasSubscription: boolean;
+
   tierEntity?: {
     tier: "NONE" | "BASIC" | "PRO" | "TRIAL";
+
     billing?: {
       renewalPeriod: "MONTHLY" | "ANNUAL" | null;
-      subscriptionStartDate: string | null;
-      subscriptionEndDate: string | null;
+
+      // Lifecycle dates
+      currentPeriodStart: string | null;
+      currentPeriodEnd: string | null;
+
+      // Razorpay identifiers
       razorpaySubscriptionId?: string;
       razorpayCustomerId?: string;
-      isCancelled?: boolean;
-      cancellationReason?: string;
-      cancelledAt?: string;
+
+      // Payment state
+      lastPaymentStatus?: "PAID" | "FAILED" | "PENDING";
+      lastPaymentAt?: string | null;
+
+      // Cancellation / Halt
+      status?: "ACTIVE" | "HALTED" | "CANCELLED";
+      statusReason?: string | null;
+      statusChangedAt?: string | null;
+
+      // Upgrade/Downgrade
       upgradeInProgress?: boolean;
-      newPlanId?: string;
-      newSubscriptionId?: string;
-      proratedAmount?: number;
-      proratedOrderId?: string;
-      proratedPaid?: boolean;
-      proratedPaidAt?: string;
-      subscriptionTransitioned?: boolean;
-      transitionedAt?: string;
-      mandateAuthenticated?: boolean;
-      mandateAuthenticatedAt?: string;
-      paymentFailed?: boolean;
-      paymentFailedAt?: string;
-      subscriptionHalted?: boolean;
-      haltedAt?: string;
+      targetPlanId?: string | null;
+      transitionAt?: string | null;
     };
+
     createdAt: string;
     updatedAt: string;
   };
@@ -227,8 +230,8 @@ export default function Home() {
       return;
     }
 
-    const endDate = userBilling.tierEntity.billing?.subscriptionEndDate 
-      ? new Date(userBilling.tierEntity.billing.subscriptionEndDate).toLocaleDateString()
+    const endDate = userBilling.tierEntity.billing?.currentPeriodEnd 
+      ? new Date(userBilling.tierEntity.billing.currentPeriodEnd).toLocaleDateString()
       : 'current period end';
 
     const confirmMessage = `Are you sure you want to cancel your subscription? You can continue using the service until ${endDate}, then it will stop automatically. No further charges will be made.`;
@@ -352,10 +355,8 @@ export default function Home() {
     const isYearly = plan.duration === 'yearly';
     const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
     
-    const isActiveSubscription = userBilling?.tierEntity?.billing?.subscriptionTransitioned && 
-                                  userBilling?.tierEntity?.billing?.mandateAuthenticated &&
-                                  !userBilling?.tierEntity?.billing?.subscriptionHalted &&
-                                  !userBilling?.tierEntity?.billing?.isCancelled;
+    const isActiveSubscription = Boolean(userBilling?.tierEntity?.billing?.razorpaySubscriptionId && 
+                                         userBilling?.tierEntity?.billing?.status === 'ACTIVE');
     
     if (!isActiveSubscription) return "Subscribe Now";
     
@@ -386,10 +387,8 @@ export default function Home() {
     const isYearly = plan.duration === 'yearly';
     const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
     
-    const isActiveSubscription = userBilling?.tierEntity?.billing?.subscriptionTransitioned && 
-                                  userBilling?.tierEntity?.billing?.mandateAuthenticated &&
-                                  !userBilling?.tierEntity?.billing?.subscriptionHalted &&
-                                  !userBilling?.tierEntity?.billing?.isCancelled;
+    const isActiveSubscription = Boolean(userBilling?.tierEntity?.billing?.razorpaySubscriptionId && 
+                                         userBilling?.tierEntity?.billing?.status === 'ACTIVE');
     
     // Disable if it's the current plan or if subscription is not active
     return isActiveSubscription && 
@@ -404,6 +403,64 @@ export default function Home() {
           <h1 className="text-3xl font-bold text-gray-900">
             Subscription Management
           </h1>
+        </div>
+
+        {/* Current Tier and Status Display */}
+        <div className="text-center mb-6">
+          <div className="inline-flex items-center gap-3 px-6 py-3 bg-white rounded-lg shadow-sm border">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-gray-600">Current Plan:</span>
+              <span className={`px-3 py-1 rounded-full text-sm font-semibold ${
+                userBilling?.tierEntity?.tier === 'PRO' 
+                  ? 'bg-purple-100 text-purple-800' 
+                  : userBilling?.tierEntity?.tier === 'BASIC'
+                    ? 'bg-blue-100 text-blue-800'
+                    : 'bg-gray-100 text-gray-800'
+              }`}>
+                {userBilling?.tierEntity?.tier || 'NONE'}
+              </span>
+            </div>
+            
+            {userBilling?.hasSubscription && userBilling?.tierEntity?.billing?.status && (
+              <>
+                <div className="w-px h-6 bg-gray-300"></div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-gray-600">Status:</span>
+                  <span className={`px-3 py-1 rounded-full text-sm font-semibold ${
+                    userBilling?.tierEntity?.billing?.status === 'ACTIVE' 
+                      ? 'bg-green-100 text-green-800' 
+                      : userBilling?.tierEntity?.billing?.status === 'HALTED'
+                        ? 'bg-yellow-100 text-yellow-800'
+                        : 'bg-red-100 text-red-800'
+                  }`}>
+                    {userBilling?.tierEntity?.billing?.status}
+                  </span>
+                </div>
+              </>
+            )}
+            
+            {userBilling?.tierEntity?.billing?.renewalPeriod && (
+              <>
+                <div className="w-px h-6 bg-gray-300"></div>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-gray-600">Billing:</span>
+                  <span className="px-3 py-1 rounded-full text-sm font-medium bg-gray-100 text-gray-700">
+                    {userBilling?.tierEntity?.billing?.renewalPeriod}
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+          
+          {userBilling?.tierEntity?.billing?.upgradeInProgress && (
+            <div className="mt-3 inline-flex items-center gap-2 px-4 py-2 bg-orange-100 text-orange-800 rounded-lg">
+              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <span className="text-sm font-medium">Upgrade in progress...</span>
+            </div>
+          )}
         </div>
 
         {/* Status Notification */}
@@ -490,32 +547,22 @@ export default function Home() {
                     <div className="flex justify-between">
                       <span className="text-gray-600">Status:</span>
                       <span className={`font-semibold ${
-                        userBilling.tierEntity.billing?.isCancelled 
-                          ? 'text-orange-600'
-                          : userBilling.tierEntity.billing?.subscriptionHalted
+                        userBilling.tierEntity.billing?.status === 'ACTIVE' 
+                          ? 'text-green-600'
+                          : userBilling.tierEntity.billing?.status === 'CANCELLED'
+                            ? 'text-orange-600'
+                          : userBilling.tierEntity.billing?.status === 'HALTED'
                             ? 'text-red-600'
-                          : userBilling.tierEntity.billing?.subscriptionTransitioned && userBilling.tierEntity.billing?.mandateAuthenticated
-                            ? 'text-green-600' 
-                            : userBilling.tierEntity.billing?.paymentFailed
-                              ? 'text-yellow-600'
-                              : 'text-red-600'
+                            : 'text-gray-600'
                       }`}>
-                        {userBilling.tierEntity.billing?.isCancelled 
-                          ? 'CANCELLED' 
-                          : userBilling.tierEntity.billing?.subscriptionHalted
-                            ? 'HALTED'
-                          : userBilling.tierEntity.billing?.subscriptionTransitioned && userBilling.tierEntity.billing?.mandateAuthenticated
-                            ? 'ACTIVE' 
-                            : userBilling.tierEntity.billing?.paymentFailed
-                              ? 'PAYMENT FAILED'
-                              : 'INACTIVE'}
+                        {userBilling.tierEntity.billing?.status || 'UNKNOWN'}
                       </span>
                     </div>
-                    {userBilling.tierEntity.billing?.isCancelled && (
+                    {userBilling.tierEntity.billing?.status === 'CANCELLED' && (
                       <div className="flex justify-between">
                         <span className="text-gray-600">Cancellation:</span>
                         <span className="font-semibold text-gray-900">
-                          {userBilling.tierEntity.billing?.cancellationReason?.includes('cycle_end') ? 'At cycle end' : 'Immediate'}
+                          {userBilling.tierEntity.billing?.statusReason || 'Cancelled'}
                         </span>
                       </div>
                     )}
@@ -525,22 +572,17 @@ export default function Home() {
                           <span className="text-sm font-medium text-blue-800">Upgrade In Progress</span>
                           <span className="text-xs text-blue-600">✓</span>
                         </div>
-                        {userBilling.tierEntity.billing?.newPlanId && (
+                        {userBilling.tierEntity.billing?.targetPlanId && (
                           <div className="text-xs text-blue-700">
                             New plan scheduled for next billing cycle
                           </div>
                         )}
-                        {userBilling.tierEntity.billing?.proratedAmount && userBilling.tierEntity.billing.proratedAmount > 0 && (
-                          <div className="text-xs text-blue-700">
-                            {userBilling.tierEntity.billing?.proratedPaid 
-                              ? `Prorated payment of ₹${userBilling.tierEntity.billing.proratedAmount / 100} completed ✓`
-                              : `Prorated payment of ₹${userBilling.tierEntity.billing.proratedAmount / 100} pending`
-                            }
-                          </div>
-                        )}
+                        <div className="text-xs text-blue-700">
+                          Upgrade will be active from next billing cycle
+                        </div>
                       </div>
                     )}
-                    {userBilling.tierEntity.billing?.subscriptionTransitioned && (
+                    {userBilling.tierEntity.billing?.status === 'ACTIVE' && (
                       <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded">
                         <div className="flex justify-between items-center">
                           <span className="text-sm font-medium text-green-800">Upgrade Completed</span>
@@ -551,7 +593,7 @@ export default function Home() {
                         </div>
                       </div>
                     )}
-                    {userBilling.tierEntity.billing?.paymentFailed && (
+                    {userBilling.tierEntity.billing?.lastPaymentStatus === 'FAILED' && (
                       <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded">
                         <div className="flex justify-between items-center mb-1">
                           <span className="text-sm font-medium text-yellow-800">Payment Failed</span>
@@ -560,14 +602,14 @@ export default function Home() {
                         <div className="text-xs text-yellow-700">
                           Your payment failed. Please update your payment method or your subscription may be cancelled.
                         </div>
-                        {userBilling.tierEntity.billing?.paymentFailedAt && (
+                        {userBilling.tierEntity.billing?.lastPaymentAt && (
                           <div className="text-xs text-yellow-600 mt-1">
-                            Failed: {new Date(userBilling.tierEntity.billing.paymentFailedAt).toLocaleDateString()}
+                            Failed: {new Date(userBilling.tierEntity.billing.lastPaymentAt).toLocaleDateString()}
                           </div>
                         )}
                       </div>
                     )}
-                    {userBilling.tierEntity.billing?.subscriptionHalted && (
+                    {userBilling.tierEntity.billing?.status === 'HALTED' && (
                       <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded">
                         <div className="flex justify-between items-center mb-1">
                           <span className="text-sm font-medium text-red-800">Subscription Halted</span>
@@ -576,9 +618,9 @@ export default function Home() {
                         <div className="text-xs text-red-700">
                           Your subscription has been halted due to failed payments. You now have free tier access.
                         </div>
-                        {userBilling.tierEntity.billing?.haltedAt && (
+                        {userBilling.tierEntity.billing?.statusChangedAt && (
                           <div className="text-xs text-red-600 mt-1">
-                            Halted: {new Date(userBilling.tierEntity.billing.haltedAt).toLocaleDateString()}
+                            Halted: {new Date(userBilling.tierEntity.billing.statusChangedAt).toLocaleDateString()}
                           </div>
                         )}
                       </div>
@@ -591,10 +633,10 @@ export default function Home() {
                       <span className="text-gray-600">Renewal Period:</span>
                       <span className="font-semibold text-gray-900">{userBilling.tierEntity.billing?.renewalPeriod || 'N/A'}</span>
                     </div>
-                    {userBilling.tierEntity.billing?.subscriptionEndDate && (
+                    {userBilling.tierEntity.billing?.currentPeriodEnd && (
                       <div className="flex justify-between">
                         <span className="text-gray-600">Next Billing:</span>
-                        <span className="font-semibold text-gray-900">{new Date(userBilling.tierEntity.billing.subscriptionEndDate).toLocaleDateString()}</span>
+                        <span className="font-semibold text-gray-900">{new Date(userBilling.tierEntity.billing.currentPeriodEnd).toLocaleDateString()}</span>
                       </div>
                     )}
                     {userBilling.tierEntity.billing?.razorpaySubscriptionId && (
@@ -605,10 +647,7 @@ export default function Home() {
                     )}
                     
                     {/* Cancellation Button */}
-                    {userBilling.tierEntity.billing?.subscriptionTransitioned && 
-                     userBilling.tierEntity.billing?.mandateAuthenticated &&
-                     !userBilling.tierEntity.billing?.subscriptionHalted &&
-                     !userBilling.tierEntity.billing?.isCancelled && (
+                    {userBilling.tierEntity.billing?.status === 'ACTIVE' && (
                       <div className="mt-3 pt-3 border-t border-gray-300">
                         <div className="text-sm text-gray-700 mb-2 font-medium">Manage Subscription</div>
                         <button

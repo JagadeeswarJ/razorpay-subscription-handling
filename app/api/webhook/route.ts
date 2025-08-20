@@ -244,14 +244,22 @@ async function handleSubscriptionActivated(subscription: any) {
             }
           }
 
-          // Update existing tier with new subscription details
+          // Update existing tier with new subscription details using new structure
           await updateUserTier(userId, {
             tier: planDetails.tier,
             'billing.razorpaySubscriptionId': subscription.id,
+            'billing.currentPeriodStart': new Date().toISOString(),
+            'billing.currentPeriodEnd': nextBillingDate.toISOString(),
+            'billing.renewalPeriod': planDetails.renewalPeriod,
+            'billing.status': 'ACTIVE',
+            'billing.lastPaymentStatus': 'PAID',
+            'billing.lastPaymentAt': new Date().toISOString(),
+            'billing.upgradeInProgress': false,
+            'billing.targetPlanId': null,
+            'billing.transitionAt': new Date().toISOString(),
+            // Keep legacy fields for backward compatibility
             'billing.subscriptionStartDate': new Date().toISOString(),
             'billing.subscriptionEndDate': nextBillingDate.toISOString(),
-            'billing.renewalPeriod': planDetails.renewalPeriod,
-            'billing.upgradeInProgress': false,
             'billing.newSubscriptionId': null,
             'billing.newPlanId': null,
             'billing.subscriptionTransitioned': true,
@@ -277,11 +285,15 @@ async function handleSubscriptionActivated(subscription: any) {
         tier: planDetails.tier,
         billing: {
           renewalPeriod: planDetails.renewalPeriod,
-          trialStartDate: null,
-          trialEndDate: null,
+          currentPeriodStart: new Date().toISOString(),
+          currentPeriodEnd: nextBillingDate.toISOString(),
+          razorpaySubscriptionId: subscription.id,
+          status: 'ACTIVE',
+          lastPaymentStatus: 'PAID',
+          lastPaymentAt: new Date().toISOString(),
+          // Keep legacy fields for backward compatibility
           subscriptionStartDate: new Date().toISOString(),
           subscriptionEndDate: nextBillingDate.toISOString(),
-          razorpaySubscriptionId: subscription.id,
         },
       });
       
@@ -301,6 +313,10 @@ async function handleSubscriptionCharged(subscription: any) {
     nextBillingDate.setMonth(nextBillingDate.getMonth() + 1);
 
     await updateUserTier(userId, {
+      'billing.currentPeriodEnd': nextBillingDate.toISOString(),
+      'billing.lastPaymentStatus': 'PAID',
+      'billing.lastPaymentAt': new Date().toISOString(),
+      // Keep legacy field for backward compatibility
       'billing.subscriptionEndDate': nextBillingDate.toISOString(),
     });
   }
@@ -388,6 +404,9 @@ async function handlePaymentFailed(payment: any) {
     const userId = payment.notes.userId.replace('USER#', '');
     // Mark as payment failed but keep grace period
     await updateUserTier(userId, {
+      'billing.lastPaymentStatus': 'FAILED',
+      'billing.lastPaymentAt': new Date().toISOString(),
+      // Keep legacy fields for backward compatibility
       'billing.paymentFailed': true,
       'billing.paymentFailedAt': new Date().toISOString(),
     });
@@ -404,6 +423,11 @@ async function handleSubscriptionHalted(subscription: any) {
     // Downgrade to free tier when subscription is halted
     await updateUserTier(userId, {
       tier: 'NONE',
+      'billing.status': 'HALTED',
+      'billing.statusReason': 'Subscription halted due to payment failure',
+      'billing.statusChangedAt': new Date().toISOString(),
+      'billing.lastPaymentStatus': 'FAILED',
+      // Keep legacy fields for backward compatibility
       'billing.subscriptionHalted': true,
       'billing.haltedAt': new Date().toISOString(),
     });

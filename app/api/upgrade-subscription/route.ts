@@ -1,7 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getPlanDetails, calculateProratedUpgradeCost, getDaysRemainingInCycle, getTotalDaysInCycle } from '@/lib/billing-config';
+import { getPlanDetails, calculateProratedUpgradeCost, getDaysRemainingInCycle, getTotalDaysInCycle, RAZORPAY_PLAN_IDS } from '@/lib/billing-config';
 import { getUserTier, updateUserTier } from '@/lib/firebase';
 import Razorpay from 'razorpay';
+
+// Helper function to get current plan ID based on tier and renewal period
+function getCurrentPlanId(tier: string, renewalPeriod: string): string {
+  if (tier === 'BASIC') {
+    return renewalPeriod === 'ANNUAL' ? RAZORPAY_PLAN_IDS.BASIC_YEARLY : RAZORPAY_PLAN_IDS.BASIC_MONTHLY;
+  } else if (tier === 'PRO') {
+    return renewalPeriod === 'ANNUAL' ? RAZORPAY_PLAN_IDS.PRO_YEARLY : RAZORPAY_PLAN_IDS.PRO_MONTHLY;
+  }
+  
+  return RAZORPAY_PLAN_IDS.BASIC_MONTHLY; // fallback
+}
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -71,8 +82,9 @@ export async function POST(request: NextRequest) {
 
     // Step 1: Calculate prorated upgrade cost
     let proratedAmount = 0;
-    if (currentTier.billing?.subscriptionEndDate) {
-      const subscriptionEndDate = new Date(currentTier.billing.subscriptionEndDate);
+    const billingEndDate = currentTier.billing?.currentPeriodEnd || currentTier.billing?.subscriptionEndDate;
+    if (billingEndDate) {
+      const subscriptionEndDate = new Date(billingEndDate);
       const daysRemaining = getDaysRemainingInCycle(subscriptionEndDate);
       const totalDays = getTotalDaysInCycle(currentTier.billing.renewalPeriod || "MONTHLY");
       
@@ -125,12 +137,15 @@ export async function POST(request: NextRequest) {
       razorpayKeySecret: process.env.RAZORPAY_SECRET!,
       isUpgrade: true,
       oldSubscriptionId: currentSubscriptionId,
-      startAt: currentTier.billing?.subscriptionEndDate ? Math.floor(new Date(currentTier.billing.subscriptionEndDate).getTime() / 1000) : undefined,
+      startAt: billingEndDate ? Math.floor(new Date(billingEndDate).getTime() / 1000) : undefined,
     });
 
-    // Step 4: Update user tier with upgrade info
+    // Step 4: Update user tier with upgrade info using new structure
     await updateUserTier(username, {
       'billing.upgradeInProgress': true,
+      'billing.targetPlanId': newPlanId,
+      'billing.transitionAt': billingEndDate || new Date().toISOString(),
+      // Keep legacy fields for backward compatibility
       'billing.newPlanId': newPlanId,
       'billing.newSubscriptionId': newSubscription.id,
       'billing.proratedOrderId': proratedPaymentOrder?.id || null,
@@ -156,7 +171,7 @@ export async function POST(request: NextRequest) {
         planId: newPlanId,
         tier: newPlanDetails.tier,
         amount: newPlanDetails.amount,
-        startDate: currentTier.billing?.subscriptionEndDate || new Date().toISOString(),
+        startDate: billingEndDate || new Date().toISOString(),
       },
       proratedAmount: proratedAmount / 100, // Convert to rupees for display
     }, {
@@ -176,18 +191,6 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// Helper function to get current plan ID based on tier and renewal period
-function getCurrentPlanId(tier: string, renewalPeriod: string): string {
-  const { RAZORPAY_PLAN_IDS } = require('@/lib/billing-config');
-  
-  if (tier === 'BASIC') {
-    return renewalPeriod === 'ANNUAL' ? RAZORPAY_PLAN_IDS.BASIC_YEARLY : RAZORPAY_PLAN_IDS.BASIC_MONTHLY;
-  } else if (tier === 'PRO') {
-    return renewalPeriod === 'ANNUAL' ? RAZORPAY_PLAN_IDS.PRO_YEARLY : RAZORPAY_PLAN_IDS.PRO_MONTHLY;
-  }
-  
-  return RAZORPAY_PLAN_IDS.BASIC_MONTHLY; // fallback
-}
 
 // Helper function to create new subscription
 async function createRazorpaySubscription({

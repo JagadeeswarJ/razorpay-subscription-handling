@@ -14,6 +14,71 @@ function getCurrentPlanId(tier: string, renewalPeriod: string): string {
   return RAZORPAY_PLAN_IDS.BASIC_MONTHLY; // fallback
 }
 
+// Calculate remaining billing cycles for subscription updates
+function calculateRemainingCount(currentTier: any, newPlanDetails: { renewalPeriod: string; tier: string }): number {
+  try {
+    // Get current subscription end date (try both new and legacy field names)
+    const currentEndDate = currentTier?.billing?.currentPeriodEnd || 
+                          currentTier?.billing?.subscriptionEndDate;
+    
+    if (!currentEndDate) {
+      console.log('No current end date found, using default remaining_count');
+      // Fallback to default values if no end date available
+      return newPlanDetails.renewalPeriod === 'MONTHLY' ? 12 : 5;
+    }
+
+    const endDate = new Date(currentEndDate);
+    const now = new Date();
+    
+    // Calculate days remaining in current billing cycle
+    const daysRemaining = Math.ceil((endDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+    
+    console.log('Remaining count calculation:', {
+      currentEndDate,
+      daysRemaining,
+      targetPeriod: newPlanDetails.renewalPeriod
+    });
+
+    if (daysRemaining <= 0) {
+      // Subscription has already expired or expires today
+      return newPlanDetails.renewalPeriod === 'MONTHLY' ? 1 : 1;
+    }
+
+    if (newPlanDetails.renewalPeriod === 'MONTHLY') {
+      // For monthly plans: convert remaining days to months
+      // Use 30 days as average month, minimum 1 month, maximum reasonable limit
+      const monthsRemaining = Math.ceil(daysRemaining / 30);
+      const calculatedCount = Math.max(1, Math.min(36, monthsRemaining)); // 1-36 months range
+      
+      console.log('Monthly plan remaining_count:', {
+        daysRemaining,
+        monthsRemaining,
+        calculatedCount
+      });
+      
+      return calculatedCount;
+    } else {
+      // For annual plans: convert remaining days to years
+      // Use 365 days per year, minimum 1 year, maximum reasonable limit
+      const yearsRemaining = Math.ceil(daysRemaining / 365);
+      const calculatedCount = Math.max(1, Math.min(10, yearsRemaining)); // 1-10 years range
+      
+      console.log('Annual plan remaining_count:', {
+        daysRemaining,
+        yearsRemaining,
+        calculatedCount
+      });
+      
+      return calculatedCount;
+    }
+    
+  } catch (error) {
+    console.error('Error calculating remaining_count:', error);
+    // Fallback to safe default values on any error
+    return newPlanDetails.renewalPeriod === 'MONTHLY' ? 12 : 5;
+  }
+}
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
@@ -22,8 +87,8 @@ const corsHeaders = {
 
 interface UpgradeRequest {
   username: string;
-  newPlanId: string;
-  currentSubscriptionId: string;
+  targetTier: "BASIC" | "PRO";
+  targetRenewalPeriod: "MONTHLY" | "ANNUAL";
 }
 
 export async function OPTIONS() {
@@ -35,13 +100,26 @@ export async function OPTIONS() {
 
 export async function POST(request: NextRequest) {
   try {
-    const { username, newPlanId, currentSubscriptionId }: UpgradeRequest = await request.json();
+    const { username, targetTier, targetRenewalPeriod }: UpgradeRequest = await request.json();
 
-    console.log('Upgrade subscription request:', { username, newPlanId, currentSubscriptionId });
+    console.log('Upgrade subscription request:', { username, targetTier, targetRenewalPeriod });
 
-    if (!username || !newPlanId || !currentSubscriptionId) {
+    if (!username || !targetTier || !targetRenewalPeriod) {
       return NextResponse.json(
-        { error: 'username, newPlanId, and currentSubscriptionId are required' },
+        { error: 'username, targetTier, and targetRenewalPeriod are required' },
+        { status: 400, headers: corsHeaders }
+      );
+    }
+
+    // Determine new plan ID from target tier and renewal period
+    let newPlanId: string;
+    if (targetTier === 'BASIC') {
+      newPlanId = targetRenewalPeriod === 'ANNUAL' ? RAZORPAY_PLAN_IDS.BASIC_YEARLY : RAZORPAY_PLAN_IDS.BASIC_MONTHLY;
+    } else if (targetTier === 'PRO') {
+      newPlanId = targetRenewalPeriod === 'ANNUAL' ? RAZORPAY_PLAN_IDS.PRO_YEARLY : RAZORPAY_PLAN_IDS.PRO_MONTHLY;
+    } else {
+      return NextResponse.json(
+        { error: 'Invalid targetTier. Must be BASIC or PRO' },
         { status: 400, headers: corsHeaders }
       );
     }
@@ -50,28 +128,89 @@ export async function POST(request: NextRequest) {
     const newPlanDetails = getPlanDetails(newPlanId);
     if (!newPlanDetails) {
       return NextResponse.json(
-        { error: 'Invalid newPlanId' },
+        { error: 'Invalid target plan configuration' },
         { status: 400, headers: corsHeaders }
       );
     }
 
     // Get current user tier to verify subscription
     const currentTier = await getUserTier(username);
-    if (!currentTier || currentTier.billing?.razorpaySubscriptionId !== currentSubscriptionId) {
+    if (!currentTier) {
       return NextResponse.json(
-        { error: 'Current subscription not found or mismatch' },
+        { error: 'User tier not found' },
         { status: 404, headers: corsHeaders }
+      );
+    }
+
+    // Get current subscription ID from database
+    const currentSubscriptionId = currentTier.billing?.razorpaySubscriptionId;
+
+    // Check if user has an active subscription (even without razorpaySubscriptionId)
+    const hasActiveSubscription = Boolean(
+      currentTier.billing && (
+        currentTier.billing.razorpaySubscriptionId ||
+        (
+          (currentTier.tier === 'BASIC' || currentTier.tier === 'PRO') &&
+          (currentTier.billing.status === 'ACTIVE' || !currentTier.billing.status) &&
+          !currentTier.billing.isCancelled &&
+          !currentTier.billing.subscriptionHalted
+        )
+      )
+    );
+
+    if (!hasActiveSubscription) {
+      return NextResponse.json(
+        { error: 'No active subscription found to upgrade' },
+        { status: 400, headers: corsHeaders }
       );
     }
 
     // Check if it's actually an upgrade
     const currentTierType = currentTier.tier;
-    const newTierType = newPlanDetails.tier;
-    if (currentTierType === newTierType) {
+    const currentRenewalPeriod = currentTier.billing?.renewalPeriod;
+    
+    if (currentTierType === targetTier && currentRenewalPeriod === targetRenewalPeriod) {
       return NextResponse.json(
-        { error: 'User is already on this tier' },
+        { error: 'User is already on this plan' },
         { status: 400, headers: corsHeaders }
       );
+    }
+
+    // Define all valid upgrade paths
+    const VALID_UPGRADES = [
+      // BASIC to PRO upgrades (any billing period combination)
+      { from: { tier: "BASIC", renewalPeriod: "MONTHLY" }, to: { tier: "PRO", renewalPeriod: "MONTHLY" } },
+      { from: { tier: "BASIC", renewalPeriod: "MONTHLY" }, to: { tier: "PRO", renewalPeriod: "ANNUAL" } },
+      { from: { tier: "BASIC", renewalPeriod: "ANNUAL" }, to: { tier: "PRO", renewalPeriod: "MONTHLY" } },
+      { from: { tier: "BASIC", renewalPeriod: "ANNUAL" }, to: { tier: "PRO", renewalPeriod: "ANNUAL" } },
+      // Plan period changes (same tier, different period)
+      { from: { tier: "BASIC", renewalPeriod: "MONTHLY" }, to: { tier: "BASIC", renewalPeriod: "ANNUAL" } },
+      { from: { tier: "PRO", renewalPeriod: "MONTHLY" }, to: { tier: "PRO", renewalPeriod: "ANNUAL" } }
+    ];
+
+    // Check if the requested upgrade is in the valid upgrades list
+    const isValidUpgrade = VALID_UPGRADES.some(upgrade =>
+      upgrade.from.tier === currentTierType &&
+      upgrade.from.renewalPeriod === currentRenewalPeriod &&
+      upgrade.to.tier === targetTier &&
+      upgrade.to.renewalPeriod === targetRenewalPeriod
+    );
+
+    if (!isValidUpgrade) {
+      // Generate available upgrades for this user
+      const availableUpgrades = VALID_UPGRADES
+        .filter(upgrade => 
+          upgrade.from.tier === currentTierType && 
+          upgrade.from.renewalPeriod === currentRenewalPeriod
+        )
+        .map(upgrade => upgrade.to);
+
+      return NextResponse.json({ 
+        error: 'Invalid upgrade path',
+        currentPlan: { tier: currentTierType, renewalPeriod: currentRenewalPeriod },
+        targetPlan: { tier: targetTier, renewalPeriod: targetRenewalPeriod },
+        availableUpgrades
+      }, { status: 400, headers: corsHeaders });
     }
 
     // Initialize Razorpay
@@ -87,7 +226,7 @@ export async function POST(request: NextRequest) {
     if (paymentMethod === 'upi') {
       return await handleUPIUpgrade(
         username,
-        currentSubscriptionId,
+        currentSubscriptionId || '',
         newPlanId,
         newPlanDetails,
         currentTier,
@@ -97,42 +236,106 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // For card/other payment methods: Use immediate plan update
-    console.log('Processing card/non-UPI upgrade with immediate plan update');
+    // Handle users without razorpaySubscriptionId (create new subscription)
+    if (!currentSubscriptionId) {
+      return await handleNoSubscriptionIdUpgrade(
+        username,
+        newPlanId,
+        newPlanDetails,
+        targetTier,
+        targetRenewalPeriod,
+        currentTierType,
+        currentRenewalPeriod || null,
+        corsHeaders
+      );
+    }
+
+    // For card/other payment methods: Use immediate plan update with Razorpay's prorating
+    console.log('Processing card/non-UPI upgrade with Razorpay prorating');
 
     try {
-      // Update subscription immediately to new plan
-      const updatedSubscription = await razorpay.subscriptions.update(currentSubscriptionId, {
-        plan_id: newPlanId,
-        schedule_change_at: "now", // change immediately
-        customer_notify: 1
+      // Calculate prorated information for logging
+      let proratedInfo = null;
+      if (billingEndDate) {
+        const subscriptionEndDate = new Date(billingEndDate);
+        const daysRemaining = getDaysRemainingInCycle(subscriptionEndDate);
+        const totalDays = getTotalDaysInCycle(currentTier.billing?.renewalPeriod || "MONTHLY");
+        
+        // Get current plan amount for comparison
+        const currentPlanId = getCurrentPlanId(currentTier.tier, currentTier.billing?.renewalPeriod || "MONTHLY");
+        const currentPlanDetails = getPlanDetails(currentPlanId);
+        const currentPlanAmount = currentPlanDetails?.amount || 0;
+        
+        // Calculate what the user would be charged/credited
+        const proratedUpgradeCost = calculateProratedUpgradeCost(
+          currentPlanAmount,
+          newPlanDetails.amount,
+          daysRemaining,
+          totalDays
+        );
+        
+        proratedInfo = {
+          currentPlanAmount,
+          newPlanAmount: newPlanDetails.amount,
+          daysRemaining,
+          totalDays,
+          proratedUpgradeCost,
+          billingEndDate,
+        };
+
+        console.log('Card upgrade prorated calculation:', proratedInfo);
+      }
+
+      // Update subscription immediately to new plan - Razorpay will handle prorating automatically
+      // Using direct HTTP API instead of SDK for better control and logging
+      const updatedSubscription = await updateRazorpaySubscription(
+        currentSubscriptionId,
+        newPlanId,
+        paymentMethod as string,
+        { renewalPeriod: targetRenewalPeriod, tier: targetTier },
+        currentTier
+      );
+
+      console.log('Card subscription updated with prorating:', {
+        subscriptionId: updatedSubscription.id,
+        status: updatedSubscription.status,
+        planId: newPlanId,
+        proratedInfo
       });
 
-      console.log('Subscription updated immediately:', updatedSubscription.id);
-
-      // Update user tier with new plan details
+      // Update user tier in database - webhook will handle final confirmation
       await updateUserTier(username, {
-        tier: newPlanDetails.tier,
-        'billing.renewalPeriod': newPlanDetails.renewalPeriod,
-        'billing.targetPlanId': null,
+        tier: targetTier,
+        'billing.renewalPeriod': targetRenewalPeriod,
+        'billing.razorpaySubscriptionId': updatedSubscription.id,
         'billing.upgradeInProgress': false,
         'billing.transitionAt': new Date().toISOString(),
         'billing.lastPaymentStatus': 'PAID',
         'billing.lastPaymentAt': new Date().toISOString(),
+        'billing.upgradeMethod': 'card_prorated',
+        'billing.proratedInfo': proratedInfo ? JSON.stringify(proratedInfo) : null,
       });
 
-      console.log('Immediate upgrade completed for user:', username);
+      console.log('Card upgrade completed for user:', username);
 
       return NextResponse.json({
         success: true,
-        message: 'Subscription upgraded successfully! Your new plan is now active.',
-        upgradeType: 'immediate',
-        subscription: {
-          id: updatedSubscription.id,
-          status: updatedSubscription.status,
-          planId: newPlanId,
-          tier: newPlanDetails.tier,
-          amount: newPlanDetails.amount,
+        message: 'Card subscription upgrade initiated successfully',
+        data: {
+          upgradeInitiated: new Date().toISOString(),
+          fromPlan: { 
+            tier: currentTierType, 
+            renewalPeriod: currentRenewalPeriod || 'UNKNOWN' 
+          },
+          toPlan: { 
+            tier: targetTier, 
+            renewalPeriod: targetRenewalPeriod 
+          },
+          subscriptionId: updatedSubscription.id,
+          razorpayStatus: updatedSubscription.status,
+          paymentMethod: paymentMethod || 'card',
+          immediateUpgrade: false,
+          note: 'Upgrade will be confirmed via webhook. Prorated billing applies.'
         },
       }, {
         status: 200,
@@ -140,7 +343,7 @@ export async function POST(request: NextRequest) {
       });
 
     } catch (error) {
-      console.error('Failed to update subscription immediately:', error);
+      console.error('Failed to upgrade card subscription:', error);
       return NextResponse.json(
         {
           error: 'Failed to upgrade subscription',
@@ -321,118 +524,188 @@ async function createCustomInvoiceForSubscription({
   });
 }
 
-// Create subscription with upfront discount for first payment
-async function createRazorpaySubscriptionWithUpfrontDiscount({
-  planId,
-  planDetails,
-  username,
-  razorpayKeyId,
-  razorpayKeySecret,
-  isUpgrade = false,
-  oldSubscriptionId,
-  discountAmount,
-}: {
-  planId: string;
-  planDetails: { tier: string; renewalPeriod: string; amount: number };
-  username: string;
-  razorpayKeyId: string;
-  razorpayKeySecret: string;
-  isUpgrade?: boolean;
-  oldSubscriptionId?: string;
-  discountAmount: number;
-}): Promise<any> {
+// Razorpay subscription update via API (for card-based payments)
+const updateRazorpaySubscription = async (
+  subscriptionId: string,
+  newPlanId: string,
+  currentPaymentMethod: string,
+  newPlanDetails?: { renewalPeriod: string; tier: string },
+  currentTier?: any
+): Promise<any> => {
+  try {
+    // Only allow card-based subscription updates via PATCH API
+    if (currentPaymentMethod === 'upi') {
+      throw new Error('UPI subscriptions should use createFutureUpiSubscription method');
+    }
 
-  // If no discount, use regular subscription creation
-  if (discountAmount <= 0) {
-    return createRazorpaySubscription({
-      planId,
-      planDetails,
-      username,
-      razorpayKeyId,
-      razorpayKeySecret,
-      isUpgrade,
-      oldSubscriptionId,
+    // Create basic auth header
+    const auth = Buffer.from(`${process.env.RAZORPAY_ID!}:${process.env.RAZORPAY_SECRET!}`).toString('base64');
+    
+    // Update subscription data - only use parameters Razorpay accepts
+    const updateData: any = {
+      plan_id: newPlanId,           // New plan (higher tier)
+      schedule_change_at: "now",    // Critical: immediate effect
+      customer_notify: 1            // Send email to customer
+    };
+
+    // Add remaining_count for plans with different billing periods
+    if (newPlanDetails) {
+      const remainingCount = calculateRemainingCount(currentTier, newPlanDetails);
+      updateData.remaining_count = remainingCount;
+      
+      console.log('Calculated remaining_count for subscription update:', {
+        subscriptionId,
+        currentTier: currentTier?.tier,
+        currentPeriod: currentTier?.billing?.renewalPeriod,
+        targetTier: newPlanDetails.tier,
+        targetPeriod: newPlanDetails.renewalPeriod,
+        remainingCount,
+        currentEndDate: currentTier?.billing?.currentPeriodEnd || currentTier?.billing?.subscriptionEndDate
+      });
+    }
+
+    console.log('Updating Razorpay subscription', { 
+      subscriptionId, 
+      newPlanId,
+      currentPaymentMethod,
+      updateData 
     });
+
+    const https = await import('https');
+    const postData = JSON.stringify(updateData);
+
+    const options = {
+      hostname: 'api.razorpay.com',
+      port: 443,
+      path: `/v1/subscriptions/${subscriptionId}`,
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData),
+        'Authorization': `Basic ${auth}`,
+      },
+    };
+
+    return new Promise((resolve, reject) => {
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        res.on('end', () => {
+          if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+            const updatedSubscription = JSON.parse(data);
+            console.log('Razorpay subscription updated successfully', {
+              statusCode: res.statusCode,
+              subscriptionId: updatedSubscription.id,
+              newPlanId: updatedSubscription.plan_id,
+              status: updatedSubscription.status,
+              response: data.substring(0, 500),
+            });
+            resolve(updatedSubscription);
+          } else {
+            console.error('Razorpay upgrade API error', {
+              statusCode: res.statusCode,
+              response: data,
+              subscriptionId,
+              newPlanId
+            });
+            reject(new Error(`Razorpay API error: ${res.statusCode} - ${data}`));
+          }
+        });
+      });
+
+      req.on('error', (error) => {
+        console.error('Razorpay upgrade request error', { error, subscriptionId, newPlanId });
+        reject(error);
+      });
+
+      req.write(postData);
+      req.end();
+    });
+
+  } catch (error) {
+    console.error('Error updating Razorpay subscription', { error, subscriptionId, newPlanId });
+    throw error;
   }
+};
 
-  const totalCount = planDetails.renewalPeriod === 'MONTHLY' ? 12 : 5;
-  const firstPaymentAmount = Math.max(0, planDetails.amount - discountAmount);
+// Handle upgrade for users without razorpaySubscriptionId - create new subscription
+async function handleNoSubscriptionIdUpgrade(
+  username: string,
+  newPlanId: string,
+  newPlanDetails: { tier: string; renewalPeriod: string; amount: number },
+  targetTier: "BASIC" | "PRO",
+  targetRenewalPeriod: "MONTHLY" | "ANNUAL",
+  currentTierType: string,
+  currentRenewalPeriod: string | null,
+  corsHeaders: any
+) {
+  try {
+    console.log('Creating new subscription for user without razorpaySubscriptionId:', {
+      username,
+      targetTier,
+      targetRenewalPeriod,
+      newPlanId
+    });
 
-  console.log('Creating subscription with upfront discount:', {
-    originalAmount: planDetails.amount,
-    discountAmount,
-    firstPaymentAmount,
-  });
+    // Create new subscription
+    const newSubscription = await createRazorpaySubscription({
+      planId: newPlanId,
+      planDetails: newPlanDetails,
+      username,
+      razorpayKeyId: process.env.RAZORPAY_ID!,
+      razorpayKeySecret: process.env.RAZORPAY_SECRET!,
+      isUpgrade: true,
+    });
 
-  // Create subscription with addons array containing upgrade credit
-  const subscriptionData: any = {
-    plan_id: planId,
-    total_count: totalCount,
-    quantity: 1,
-    customer_notify: true,
-    notes: {
-      userId: `USER#${username}`,
-      tier: planDetails.tier,
-      renewalPeriod: planDetails.renewalPeriod,
-      planId: planId,
-      isUpgrade: isUpgrade ? 'true' : 'false',
-      oldSubscriptionId: oldSubscriptionId || '',
-      hasUpfrontDiscount: 'true',
-      discountAmount: discountAmount.toString(),
-    },
-    // Try using offer_id or coupon approach instead of addons
-    addons: [
-      {
-        item: {
-          name: "Upgrade Credit",
-          amount: discountAmount, // Positive amount that will be credited
-          currency: "INR"
+    // Update user tier with new subscription details
+    await updateUserTier(username, {
+      tier: targetTier,
+      'billing.renewalPeriod': targetRenewalPeriod,
+      'billing.razorpaySubscriptionId': newSubscription.id,
+      'billing.upgradeInProgress': false,
+      'billing.transitionAt': new Date().toISOString(),
+      'billing.status': 'ACTIVE',
+      'billing.lastPaymentStatus': 'PAID',
+      'billing.lastPaymentAt': new Date().toISOString(),
+    });
+
+    console.log('New subscription created for upgrade:', newSubscription.id);
+
+    return NextResponse.json({
+      success: true,
+      message: 'New subscription created successfully for upgrade',
+      data: {
+        upgradeInitiated: new Date().toISOString(),
+        fromPlan: { 
+          tier: currentTierType, 
+          renewalPeriod: currentRenewalPeriod || 'UNKNOWN' 
         },
-        quantity: 1
-      }
-    ]
-  };
-
-  const postData = JSON.stringify(subscriptionData);
-  const auth = Buffer.from(`${razorpayKeyId}:${razorpayKeySecret}`).toString('base64');
-  const https = await import('https');
-
-  const options = {
-    hostname: 'api.razorpay.com',
-    port: 443,
-    path: '/v1/subscriptions',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(postData),
-      Authorization: `Basic ${auth}`,
-    },
-  };
-
-  return new Promise((resolve, reject) => {
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => {
-        data += chunk;
-      });
-      res.on('end', () => {
-        console.log('Subscription creation response:', res.statusCode, data);
-        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-          const subscription = JSON.parse(data);
-          resolve(subscription);
-        } else {
-          reject(new Error(`Razorpay API error: ${res.statusCode} - ${data}`));
-        }
-      });
+        toPlan: { 
+          tier: targetTier, 
+          renewalPeriod: targetRenewalPeriod 
+        },
+        subscriptionId: newSubscription.id,
+        razorpayStatus: newSubscription.status,
+        paymentMethod: 'card',
+        immediateUpgrade: true,
+        mandateAuthRequired: true,
+        mandateUrl: newSubscription.short_url,
+        note: 'New subscription created. Please complete payment setup.'
+      },
+    }, {
+      status: 200,
+      headers: corsHeaders,
     });
 
-    req.on('error', (error) => {
-      reject(error);
-    });
-
-    req.write(postData);
-    req.end();
-  });
+  } catch (error) {
+    console.error('Failed to create new subscription for upgrade:', error);
+    return NextResponse.json({
+      error: 'Failed to create new subscription for upgrade',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    }, { status: 500, headers: corsHeaders });
+  }
 }
 
 // Handle UPI upgrades - cancel current subscription and create new with prorated addon

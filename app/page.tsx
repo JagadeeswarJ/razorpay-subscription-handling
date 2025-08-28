@@ -141,21 +141,32 @@ export default function Home() {
   const handleSubscribe = async (plan: SubscriptionPlan) => {
     console.log('Handling subscription for plan:', plan.id);
 
-    // Check if user has active subscription and this is an upgrade or downgrade
-    if (userBilling?.hasSubscription && userBilling.tierEntity?.billing?.razorpaySubscriptionId) {
+    // Check if user has active subscription and this is an upgrade
+    if (userBilling?.hasSubscription && userBilling.tierEntity) {
       const currentTier = userBilling.tierEntity.tier;
+      const currentRenewalPeriod = userBilling.tierEntity.billing?.renewalPeriod;
       const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
+      const newRenewalPeriod = plan.duration === 'yearly' ? 'ANNUAL' : 'MONTHLY';
       
-      if (currentTier !== newTier && (currentTier === 'BASIC' || currentTier === 'PRO')) {
-        if (currentTier === 'BASIC' && newTier === 'PRO') {
-          // This is an upgrade - handle via upgrade API
-          await handleUpgrade(plan);
-          return;
-        } else if (currentTier === 'PRO' && newTier === 'BASIC') {
-          // This is a downgrade - handle via downgrade API
-          await handleDowngrade(plan);
-          return;
-        }
+      // Check if this is a valid upgrade path
+      const isValidUpgrade = (
+        // BASIC to PRO upgrades (any billing period combination)
+        (currentTier === 'BASIC' && newTier === 'PRO') ||
+        // Plan period changes (same tier, MONTHLY to ANNUAL)
+        (currentTier === newTier && currentRenewalPeriod === 'MONTHLY' && newRenewalPeriod === 'ANNUAL')
+      );
+      
+      if (isValidUpgrade && (currentTier === 'BASIC' || currentTier === 'PRO')) {
+        // This is a valid upgrade - handle via upgrade API
+        await handleUpgrade(plan);
+        return;
+      }
+      
+      // Handle downgrades if needed (PRO to BASIC - currently disabled)
+      if (currentTier === 'PRO' && newTier === 'BASIC') {
+        // This is a downgrade - handle via downgrade API
+        await handleDowngrade(plan);
+        return;
       }
     }
 
@@ -165,7 +176,7 @@ export default function Home() {
   };
 
   const handleUpgrade = async (plan: SubscriptionPlan) => {
-    if (!userBilling?.tierEntity?.billing?.razorpaySubscriptionId) {
+    if (!userBilling?.hasSubscription || !userBilling?.tierEntity) {
       setUpgradeStatus({
         show: true,
         message: 'No active subscription found',
@@ -180,6 +191,10 @@ export default function Home() {
     try {
       console.log('Processing upgrade...');
       
+      // Determine target tier and renewal period from plan
+      const targetTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
+      const targetRenewalPeriod = plan.duration === 'yearly' ? 'ANNUAL' : 'MONTHLY';
+      
       const response = await fetch('/api/upgrade-subscription', {
         method: 'POST',
         headers: {
@@ -187,8 +202,8 @@ export default function Home() {
         },
         body: JSON.stringify({
           username: username,
-          newPlanId: plan.razorpayPlanId,
-          currentSubscriptionId: userBilling.tierEntity.billing.razorpaySubscriptionId,
+          targetTier: targetTier as 'BASIC' | 'PRO',
+          targetRenewalPeriod: targetRenewalPeriod as 'MONTHLY' | 'ANNUAL',
         }),
       });
 
@@ -429,7 +444,8 @@ export default function Home() {
     const isYearly = plan.duration === 'yearly';
     const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
     
-    const isActiveSubscription = Boolean(userBilling?.tierEntity?.billing?.razorpaySubscriptionId && 
+    // Check if user has an active subscription based on hasSubscription flag and status
+    const isActiveSubscription = Boolean(userBilling?.hasSubscription && 
                                          userBilling?.tierEntity?.billing?.status === 'ACTIVE');
     
     if (!isActiveSubscription) return "Subscribe Now";
@@ -461,7 +477,8 @@ export default function Home() {
     const isYearly = plan.duration === 'yearly';
     const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
     
-    const isActiveSubscription = Boolean(userBilling?.tierEntity?.billing?.razorpaySubscriptionId && 
+    // Check if user has an active subscription based on hasSubscription flag and status
+    const isActiveSubscription = Boolean(userBilling?.hasSubscription && 
                                          userBilling?.tierEntity?.billing?.status === 'ACTIVE');
     
     // Disable if it's the current plan or if subscription is not active

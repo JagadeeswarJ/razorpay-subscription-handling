@@ -18,11 +18,43 @@ const logWebhookEvent = (eventData: any) => {
     timestamp: new Date().toISOString(),
     event: eventData.event,
     entity: eventData.payload?.payment?.entity || eventData.payload?.subscription?.entity,
-    data: eventData,
+    entityType: eventData.payload?.payment ? 'payment' : eventData.payload?.subscription ? 'subscription' : 'unknown',
+    entityId: eventData.payload?.payment?.entity?.id || eventData.payload?.subscription?.entity?.id,
+    userId: extractUserIdFromPayload(eventData.payload),
+    fullPayload: eventData, // Log complete webhook data
   };
 
-  const logString = JSON.stringify(logEntry) + '\n';
+  const logString = JSON.stringify(logEntry, null, 2) + '\n' + '---\n';
   fs.appendFileSync(logFile, logString);
+  
+  // Also log to console for real-time monitoring
+  console.log('Webhook Event Logged:', {
+    timestamp: logEntry.timestamp,
+    event: logEntry.event,
+    entityType: logEntry.entityType,
+    entityId: logEntry.entityId,
+    userId: logEntry.userId
+  });
+};
+
+// Helper function to extract userId from various payload structures
+const extractUserIdFromPayload = (payload: any): string | null => {
+  try {
+    // Check payment entity
+    if (payload?.payment?.entity?.notes?.userId) {
+      return payload.payment.entity.notes.userId.replace('USER#', '');
+    }
+    
+    // Check subscription entity
+    if (payload?.subscription?.entity?.notes?.userId) {
+      return payload.subscription.entity.notes.userId.replace('USER#', '');
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error extracting userId from payload:', error);
+    return null;
+  }
 };
 
 export async function POST(request: NextRequest) {
@@ -52,11 +84,16 @@ export async function POST(request: NextRequest) {
 
     const event = JSON.parse(body);
 
+    // Enhanced webhook logging
     console.log('Webhook received:', {
       event: event.event,
       created_at: event.created_at,
+      account_id: event.account_id,
+      entity: event.entity,
+      contains: event.contains,
     });
 
+    // Log the complete webhook data
     logWebhookEvent(event);
 
     // Handle different webhook events and store to Firebase
@@ -67,14 +104,6 @@ export async function POST(request: NextRequest) {
 
       case 'payment.failed':
         await handlePaymentFailed(event.payload.payment.entity);
-        break;
-        
-      case 'refund.created':
-        await handleRefundCreated(event.payload.refund.entity);
-        break;
-        
-      case 'refund.processed':
-        await handleRefundProcessed(event.payload.refund.entity);
         break;
 
       case 'subscription.activated':
@@ -359,52 +388,78 @@ async function handleSubscriptionCancelled(subscription: any) {
 async function handleSubscriptionUpdated(subscription: any) {
   console.log('Subscription updated:', subscription);
   
-  if (subscription.notes && subscription.notes.userId && subscription.notes.planId) {
+  // Log comprehensive subscription update details
+  console.log('Subscription update details:', {
+    id: subscription.id,
+    plan_id: subscription.plan_id,
+    status: subscription.status,
+    payment_method: subscription.payment_method,
+    current_start: subscription.current_start,
+    current_end: subscription.current_end,
+    has_scheduled_changes: subscription.has_scheduled_changes,
+    change_scheduled_at: subscription.change_scheduled_at,
+    notes: subscription.notes,
+  });
+  
+  if (subscription.notes && subscription.notes.userId) {
     const userId = subscription.notes.userId.replace('USER#', '');
-    const planDetails = getPlanDetails(subscription.notes.planId);
+    
+    // Try to get plan details from the subscription plan_id
+    let planDetails = getPlanDetails(subscription.plan_id);
+    
+    // Fallback to notes planId if subscription plan_id doesn't match our mapping
+    if (!planDetails && subscription.notes.planId) {
+      planDetails = getPlanDetails(subscription.notes.planId);
+    }
     
     if (planDetails) {
-      console.log('Processing subscription update for:', userId);
+      console.log('Processing subscription update for:', userId, {
+        fromNotes: subscription.notes.planId,
+        fromSubscription: subscription.plan_id,
+        resolvedTier: planDetails.tier,
+        renewalPeriod: planDetails.renewalPeriod,
+      });
       
-      // Update Firebase with new plan details and clear any pending changes
+      // Convert Razorpay timestamps to ISO strings
+      const currentPeriodStart = subscription.current_start ? new Date(subscription.current_start * 1000).toISOString() : null;
+      const currentPeriodEnd = subscription.current_end ? new Date(subscription.current_end * 1000).toISOString() : null;
+      
+      console.log('Updating billing dates from subscription.updated:', {
+        current_start: subscription.current_start,
+        current_end: subscription.current_end,
+        currentPeriodStart,
+        currentPeriodEnd,
+      });
+      
+      // Update Firebase with new plan details and billing dates
       await updateUserTier(userId, {
         tier: planDetails.tier,
         'billing.renewalPeriod': planDetails.renewalPeriod,
+        'billing.currentPeriodStart': currentPeriodStart,
+        'billing.currentPeriodEnd': currentPeriodEnd,
+        'billing.subscriptionUpdated': true,
+        'billing.subscriptionUpdatedAt': new Date().toISOString(),
+        'billing.lastWebhookEvent': 'subscription.updated',
+        'billing.lastWebhookAt': new Date().toISOString(),
+        'billing.payment_method': subscription.payment_method,
+        // Update legacy fields as well for backward compatibility
+        'billing.subscriptionStartDate': currentPeriodStart,
+        'billing.subscriptionEndDate': currentPeriodEnd,
       });
       
-      console.log('Subscription update processed for user:', userId, 'new tier:', planDetails.tier);
+      console.log('Subscription update processed successfully for user:', userId, 'new tier:', planDetails.tier);
+    } else {
+      console.error('No plan details found for subscription update:', {
+        userId,
+        subscriptionPlanId: subscription.plan_id,
+        notesPlanId: subscription.notes.planId,
+      });
     }
+  } else {
+    console.log('No userId found in subscription notes for update:', subscription.id);
   }
 }
 
-async function handleRefundCreated(refund: any) {
-  console.log('Refund created:', refund);
-  
-  // Log refund creation for audit trail
-  if (refund.notes && refund.notes.subscription_id) {
-    console.log('Refund created for subscription plan change:', {
-      refundId: refund.id,
-      amount: refund.amount,
-      reason: refund.notes.reason,
-      subscriptionId: refund.notes.subscription_id,
-      status: refund.status,
-    });
-  }
-}
-
-async function handleRefundProcessed(refund: any) {
-  console.log('Refund processed successfully:', refund);
-  
-  // Update any relevant records if needed
-  if (refund.notes && refund.notes.subscription_id) {
-    console.log('Refund processed for subscription plan change:', {
-      refundId: refund.id,
-      amount: refund.amount,
-      status: refund.status,
-      processedAt: new Date().toISOString(),
-    });
-  }
-}
 
 async function handleSubscriptionCompleted(subscription: any) {
   console.log('Subscription completed:', subscription);

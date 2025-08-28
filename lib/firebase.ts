@@ -211,9 +211,24 @@ export const getUserBilling = async (userId: string): Promise<UserTierInfo | nul
     const tierData = tierDoc.data() as TierEntity;
 
     // Transform legacy data to new structure
+    // Determine if user has active subscription based on multiple factors
+    const hasActiveSubscription = Boolean(
+      tierData.billing && (
+        // Has razorpay subscription ID
+        tierData.billing.razorpaySubscriptionId ||
+        // Or has active paid tier that's not NONE or TRIAL
+        (
+          (tierData.tier === 'BASIC' || tierData.tier === 'PRO') &&
+          (tierData.billing.status === 'ACTIVE' || !tierData.billing.status) &&
+          !tierData.billing.isCancelled &&
+          !tierData.billing.subscriptionHalted
+        )
+      )
+    );
+
     const userTierInfo: UserTierInfo = {
       username: userId,
-      hasSubscription: Boolean(tierData.billing?.razorpaySubscriptionId),
+      hasSubscription: hasActiveSubscription,
       tierEntity: {
         tier: tierData.tier,
         billing: tierData.billing ? {

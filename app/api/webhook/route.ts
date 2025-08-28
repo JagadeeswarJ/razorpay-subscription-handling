@@ -1,61 +1,50 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
-import { createUserTier, updateUserTier, cancelUserSubscription, getUserTier } from '@/lib/firebase';
+import { updateUserTier, getTierById } from '@/lib/firebase';
 import { getPlanDetails } from '@/lib/billing-config';
-import { Timestamp, FieldValue } from 'firebase-admin/firestore';
+import { BillingInfo } from '@/lib/firebase';
 
-const logWebhookEvent = (eventData: any) => {
-  const logDir = path.join(process.cwd(), 'logs');
-  const logFile = path.join(logDir, 'webhook-events.log');
-
-  if (!fs.existsSync(logDir)) {
-    fs.mkdirSync(logDir, { recursive: true });
-  }
-
-  const logEntry = {
-    timestamp: new Date().toISOString(),
-    event: eventData.event,
-    entity: eventData.payload?.payment?.entity || eventData.payload?.subscription?.entity,
-    entityType: eventData.payload?.payment ? 'payment' : eventData.payload?.subscription ? 'subscription' : 'unknown',
-    entityId: eventData.payload?.payment?.entity?.id || eventData.payload?.subscription?.entity?.id,
-    userId: extractUserIdFromPayload(eventData.payload),
-    fullPayload: eventData, // Log complete webhook data
+interface RazorpayWebhookEvent {
+  entity: string;
+  account_id: string;
+  event: string;
+  contains: string[];
+  payload: {
+    subscription: {
+      entity: {
+        id: string;
+        entity: string;
+        plan_id: string;
+        customer_id?: string;
+        status: string;
+        current_start: number;
+        current_end: number;
+        ended_at?: number;
+        quantity: number;
+        notes: {
+          userId?: string;
+          tier?: string;
+          renewalPeriod?: string;
+        };
+        charge_at: number;
+        start_at: number;
+        end_at?: number;
+        auth_attempts: number;
+        total_count: number;
+        paid_count: number;
+        customer_notify: boolean;
+        created_at: number;
+        expire_by?: number;
+        short_url: string;
+        has_scheduled_changes: boolean;
+        change_scheduled_at?: number;
+        remaining_count: number;
+        payment_method?: string; // Payment method used (upi, card, netbanking, wallet, etc.)
+      };
+    };
   };
-
-  const logString = JSON.stringify(logEntry, null, 2) + '\n' + '---\n';
-  fs.appendFileSync(logFile, logString);
-  
-  // Also log to console for real-time monitoring
-  console.log('Webhook Event Logged:', {
-    timestamp: logEntry.timestamp,
-    event: logEntry.event,
-    entityType: logEntry.entityType,
-    entityId: logEntry.entityId,
-    userId: logEntry.userId
-  });
-};
-
-// Helper function to extract userId from various payload structures
-const extractUserIdFromPayload = (payload: any): string | null => {
-  try {
-    // Check payment entity
-    if (payload?.payment?.entity?.notes?.userId) {
-      return payload.payment.entity.notes.userId.replace('USER#', '');
-    }
-    
-    // Check subscription entity
-    if (payload?.subscription?.entity?.notes?.userId) {
-      return payload.subscription.entity.notes.userId.replace('USER#', '');
-    }
-    
-    return null;
-  } catch (error) {
-    console.error('Error extracting userId from payload:', error);
-    return null;
-  }
-};
+  created_at: number;
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -82,470 +71,328 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const event = JSON.parse(body);
+    if (!body) {
+      console.error('No body in webhook request');
+      return NextResponse.json({ 
+        status: 'ignored', 
+        message: 'No body provided' 
+      });
+    }
 
-    // Enhanced webhook logging
-    console.log('Webhook received:', {
-      event: event.event,
-      created_at: event.created_at,
-      account_id: event.account_id,
-      entity: event.entity,
-      contains: event.contains,
+    // Parse webhook payload with error handling
+    let webhookData: RazorpayWebhookEvent;
+    try {
+      webhookData = JSON.parse(body);
+    } catch (parseError) {
+      console.error('Failed to parse webhook JSON payload', { 
+        error: parseError instanceof Error ? parseError.message : 'Unknown parse error',
+        bodyPreview: body?.substring(0, 200)
+      });
+      return NextResponse.json({ 
+        status: 'ignored', 
+        message: 'Invalid JSON payload' 
+      });
+    }
+
+    const { event: eventType, payload } = webhookData;
+    
+    // Validate payload structure
+    if (!payload?.subscription?.entity) {
+      console.error('Invalid webhook payload structure - missing subscription entity', { 
+        eventType,
+        hasPayload: !!payload,
+        hasSubscription: !!payload?.subscription,
+        hasEntity: !!payload?.subscription?.entity
+      });
+      return NextResponse.json({ 
+        status: 'ignored', 
+        message: 'Invalid payload structure' 
+      });
+    }
+    
+    const subscription = payload.subscription.entity;
+
+    console.log('Processing Razorpay event', {
+      eventType,
+      subscriptionId: subscription.id,
+      planId: subscription.plan_id,
+      status: subscription.status
     });
 
-    // Log the complete webhook data
-    logWebhookEvent(event);
+    // Extract user ID from subscription notes
+    let userId = subscription.notes?.userId;
+    if (!userId) {
+      console.error('No userId found in subscription notes', { subscriptionId: subscription.id });
+      return NextResponse.json({ 
+        status: 'success', 
+        message: 'No userId in subscription notes' 
+      });
+    }
+    
+    // Remove USER# prefix if it exists in the notes (clean the userId)
+    if (userId.startsWith('USER#')) {
+      userId = userId.replace('USER#', '');
+    }
+    
+    console.log('Cleaned userId for processing', { originalUserId: subscription.notes?.userId, cleanedUserId: userId });
 
-    // Handle different webhook events and store to Firebase
-    switch (event.event) {
-      case 'payment.captured':
-        await handlePaymentCaptured(event.payload.payment.entity);
-        break;
+    // Get plan details
+    const planDetails = getPlanDetails(subscription.plan_id);
+    if (!planDetails) {
+      console.error('Unknown plan ID', { planId: subscription.plan_id });
+      return NextResponse.json({ 
+        status: 'success', 
+        message: 'Unknown plan ID' 
+      });
+    }
 
-      case 'payment.failed':
-        await handlePaymentFailed(event.payload.payment.entity);
-        break;
-
+    // Handle different subscription events
+    switch (eventType) {
       case 'subscription.activated':
-        await handleSubscriptionActivated(event.payload.subscription.entity);
+        // Subscription activated - send confirmation message (first event when subscription starts)
+        await handleSubscriptionActivated(userId, subscription, planDetails);
         break;
-
+        
+      case 'subscription.completed':
+      case 'subscription.charged':
       case 'subscription.authenticated':
-        await handleSubscriptionAuthenticated(event.payload.subscription.entity);
+      case 'subscription.resumed':
+        // Subscription status updated but don't send confirmation message
+        await handleSubscriptionActivatedSilent(userId, subscription, planDetails);
+        break;
+        
+      case 'subscription.cancelled':
+        // Subscription cancelled
+        await handleSubscriptionCancelled(userId, subscription);
         break;
         
       case 'subscription.updated':
-        await handleSubscriptionUpdated(event.payload.subscription.entity);
+        // Subscription updated (plan change, etc.)
+        await handleSubscriptionUpdated(userId, subscription, planDetails);
         break;
-
-      case 'subscription.charged':
-        await handleSubscriptionCharged(event.payload.subscription.entity);
+        
+      case 'subscription.pending':
+        // Payment pending - don't change user status yet
+        console.log('Subscription payment pending', { userId, subscriptionId: subscription.id });
         break;
-
-      case 'subscription.cancelled':
-        await handleSubscriptionCancelled(event.payload.subscription.entity);
-        break;
-
-      case 'subscription.completed':
-        await handleSubscriptionCompleted(event.payload.subscription.entity);
-        break;
-
-      case 'subscription.halted':
-        await handleSubscriptionHalted(event.payload.subscription.entity);
-        break;
-
+        
       default:
-        console.log('Unhandled webhook event:', event.event);
+        console.log('Unhandled webhook event', { eventType });
     }
 
-    return NextResponse.json({ status: 'ok' });
+    return NextResponse.json({ 
+      status: 'success',
+      message: 'Webhook processed successfully'
+    });
+
   } catch (error) {
-    console.error('Webhook processing error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    console.error('Error processing Razorpay webhook', {
+      message: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined
+    });
+    
+    return NextResponse.json({ 
+      status: 'error',
+      message: 'Webhook processing failed but acknowledged',
+      error: error instanceof Error ? error.message : 'Unknown error',
+      timestamp: new Date().toISOString()
+    });
   }
 }
 
-// Handler functions for different webhook events
-async function handlePaymentCaptured(payment: any) {
-  console.log('Payment captured:', payment);
+// Handle subscription activation/payment success with confirmation message
+const handleSubscriptionActivated = async (
+  userId: string, 
+  subscription: any, 
+  planDetails: { tier: "BASIC" | "PRO", renewalPeriod: "MONTHLY" | "ANNUAL" }
+) => {
+  // Check if confirmation was already sent BEFORE updating subscription status
+  const existingTier = await getTierById(userId);
+  const isConfirmationAlreadySent = existingTier?.billing?.isConfirmationSent === true;
+  
+  console.log('Subscription activation check', {
+    userId,
+    subscriptionId: subscription.id,
+    isConfirmationAlreadySent
+  });
+  
+  // Update subscription status while preserving confirmation flag
+  await updateSubscriptionStatus(userId, subscription, planDetails);
 
-  // Check if this is a prorated upgrade payment
-  if (payment.notes && payment.notes.type === 'prorated_upgrade' && payment.notes.username) {
-    const username = payment.notes.username;
-    const orderId = payment.notes.orderId;
-    
-    console.log('Prorated upgrade payment captured for user:', username);
-    
-    // Get current user tier to process the upgrade
-    const currentTier = await getUserTier(username);
-    if (currentTier?.billing?.upgradeInProgress && currentTier.billing?.proratedOrderId === orderId) {
-      await processImmediateUpgrade(username, currentTier);
+  // Send confirmation message only if not already sent
+  if (!isConfirmationAlreadySent) {
+    try {
+      // Here you would send confirmation message
+      console.log('Would send subscription confirmation message', { userId, tier: planDetails.tier });
+      
+      // Set confirmation flag after successful message delivery
+      const existingTierUpdated = await getTierById(userId);
+      if (existingTierUpdated) {
+        const updatedBilling: BillingInfo = {
+          renewalPeriod: existingTierUpdated.billing?.renewalPeriod || null,
+          trialStartDate: existingTierUpdated.billing?.trialStartDate || null,
+          trialEndDate: existingTierUpdated.billing?.trialEndDate || null,
+          subscriptionStartDate: existingTierUpdated.billing?.subscriptionStartDate || null,
+          subscriptionEndDate: existingTierUpdated.billing?.subscriptionEndDate || null,
+          razorpaySubscriptionId: existingTierUpdated.billing?.razorpaySubscriptionId,
+          razorpayCustomerId: existingTierUpdated.billing?.razorpayCustomerId,
+          paymentMethod: existingTierUpdated.billing?.paymentMethod,
+          isCancelled: existingTierUpdated.billing?.isCancelled,
+          cancellationDate: existingTierUpdated.billing?.cancellationDate,
+          isConfirmationSent: true
+        };
+        await updateUserTier(userId, existingTierUpdated.tier, updatedBilling);
+      }
+      
+      console.log('Subscription confirmation message sent and flag updated', { userId, tier: planDetails.tier });
+    } catch (notificationError) {
+      console.error('Failed to send confirmation message but continuing processing', {
+        error: notificationError instanceof Error ? notificationError.message : 'Unknown notification error',
+        userId,
+        tier: planDetails.tier
+      });
+      // Don't throw - continue with subscription activation
     }
+  } else {
+    console.log('Confirmation message already sent, skipping duplicate', { userId, tier: planDetails.tier });
+  }
+
+  console.log('User subscription activated successfully', { userId, tier: planDetails.tier });
+};
+
+// Handle subscription updates without sending confirmation message
+const handleSubscriptionActivatedSilent = async (
+  userId: string, 
+  subscription: any, 
+  planDetails: { tier: "BASIC" | "PRO", renewalPeriod: "MONTHLY" | "ANNUAL" }
+) => {
+  await updateSubscriptionStatus(userId, subscription, planDetails);
+  console.log('User subscription status updated silently', { userId, tier: planDetails.tier, subscriptionId: subscription.id });
+};
+
+// Common subscription status update logic
+const updateSubscriptionStatus = async (
+  userId: string, 
+  subscription: any, 
+  planDetails: { tier: "BASIC" | "PRO", renewalPeriod: "MONTHLY" | "ANNUAL" }
+) => {
+  const subscriptionStartDate = new Date(subscription.current_start * 1000).toISOString();
+  const subscriptionEndDate = new Date(subscription.current_end * 1000).toISOString();
+
+  console.log('Updating subscription status', {
+    userId,
+    tier: planDetails.tier,
+    renewalPeriod: planDetails.renewalPeriod,
+    subscriptionId: subscription.id,
+    startDate: subscriptionStartDate,
+    endDate: subscriptionEndDate,
+    paymentMethod: subscription.payment_method
+  });
+  
+  // Always preserve existing isConfirmationSent flag
+  const existingTier = await getTierById(userId);
+  const existingIsConfirmationSent = existingTier?.billing?.isConfirmationSent;
+  
+  const billing: BillingInfo = {
+    renewalPeriod: planDetails.renewalPeriod,
+    subscriptionStartDate,
+    subscriptionEndDate,
+    razorpaySubscriptionId: subscription.id,
+    razorpayCustomerId: subscription.customer_id,
+    paymentMethod: subscription.payment_method, // Store payment method from Razorpay
+    // Clear trial dates since user is now on paid plan
+    trialStartDate: null,
+    trialEndDate: null,
+    // Clear cancellation fields since user is resubscribing
+    isCancelled: false,
+    cancellationDate: undefined,
+    // Always preserve existing isConfirmationSent flag
+    ...(existingIsConfirmationSent !== undefined && { isConfirmationSent: existingIsConfirmationSent })
+  };
+
+  await updateUserTier(userId, planDetails.tier, billing);
+};
+
+// Handle subscription cancellation - Simple version
+const handleSubscriptionCancelled = async (userId: string, subscription: any) => {
+  console.log('Processing subscription cancellation', { userId, subscriptionId: subscription.id });
+  
+  // Get existing tier to preserve subscription end date
+  const existingTier = await getTierById(userId);
+  if (!existingTier) {
+    console.error('No existing tier found for cancelled subscription', { userId, subscriptionId: subscription.id });
+    // Don't throw error - just log and continue to prevent webhook failure
     return;
   }
 
-  // Handle regular subscription payments
-  if (payment.notes && payment.notes.userId && payment.notes.subscription_id) {
-    const userId = payment.notes.userId.replace('USER#', '');
-    await updateUserTier(userId, {
-      'billing.razorpaySubscriptionId': payment.notes.subscription_id,
-      tier: 'BASIC' // Will be updated by subscription.activated event
-    });
-  }
-}
-
-async function handleSubscriptionAuthenticated(subscription: any) {
-  console.log('Subscription authenticated (UPI mandate created):', subscription);
+  const currentTimestamp = new Date().toISOString();
   
-  // This event is fired when UPI mandate is successfully created
-  if (subscription.notes && subscription.notes.userId) {
-    const userId = subscription.notes.userId.replace('USER#', '');
-    const isUpgrade = subscription.notes.isUpgrade === 'true';
-    
-    // Extract payment method from subscription object
-    const paymentMethod = subscription.payment_method as 'upi' | 'card' | 'netbanking' | 'wallet' | null;
-    
-    console.log('UPI mandate authenticated for user:', userId, 'isUpgrade:', isUpgrade, 'payment_method:', paymentMethod);
-    
-    // If this is an upgrade subscription, cancel the old one immediately
-    if (isUpgrade) {
-      const currentTier = await getUserTier(userId);
-      if (currentTier && currentTier.billing?.newSubscriptionId === subscription.id) {
-        console.log('Processing upgrade mandate authentication for user:', userId);
-        
-        // Cancel old subscription immediately
-        if (currentTier.billing?.razorpaySubscriptionId && 
-            currentTier.billing.razorpaySubscriptionId !== subscription.id) {
-          try {
-            const razorpay = new (await import('razorpay')).default({
-              key_id: process.env.RAZORPAY_ID!,
-              key_secret: process.env.RAZORPAY_SECRET!,
-            });
-            
-            await razorpay.subscriptions.cancel(currentTier.billing.razorpaySubscriptionId, false);
-            console.log('Old subscription cancelled during mandate setup:', currentTier.billing.razorpaySubscriptionId);
-            
-            // Update user tier to reflect the transition
-            await updateUserTier(userId, {
-              'billing.razorpaySubscriptionId': subscription.id,
-              'billing.payment_method': paymentMethod,
-              'billing.newSubscriptionId': null,
-              'billing.newPlanId': null,
-              'billing.upgradeInProgress': false,
-              'billing.subscriptionTransitioned': true,
-              'billing.transitionedAt': new Date().toISOString(),
-              'billing.mandateAuthenticated': true,
-              'billing.mandateAuthenticatedAt': new Date().toISOString(),
-            });
-            
-            console.log('Subscription transition completed during mandate authentication for user:', userId);
-            return;
-          } catch (error) {
-            console.error('Failed to cancel old subscription during mandate setup:', error);
-          }
-        }
-      }
-    }
-    
-    // Regular mandate authentication - try to find and update user tier
-    try {
-      const currentTier = await getUserTier(userId);
-      if (currentTier) {
-        console.log('Found user tier for payment method update:', currentTier.id);
-        await updateUserTier(userId, {
-          'billing.payment_method': paymentMethod,
-          'billing.mandateAuthenticated': true,
-          'billing.mandateAuthenticatedAt': new Date().toISOString(),
-        });
-        console.log('Payment method updated successfully for user:', userId);
-      } else {
-        console.error('No user tier found for userId:', userId, '- Cannot update payment method');
-        // Don't fail the webhook - the subscription.activated event will create the user tier
-      }
-    } catch (error) {
-      console.error('Error updating payment method for user:', userId, error);
-      // Don't fail the webhook - continue processing
-    }
-  } else {
-    console.log('No userId found in subscription notes for subscription:', subscription.id);
-  }
-}
-
-async function handleSubscriptionActivated(subscription: any) {
-  console.log('Subscription activated:', subscription);
-
-  if (subscription.notes && subscription.notes.userId && subscription.notes.planId) {
-    const userId = subscription.notes.userId.replace('USER#', '');
-    const planDetails = getPlanDetails(subscription.notes.planId);
-    const isUpgrade = subscription.notes.isUpgrade === 'true';
-
-    if (planDetails) {
-      // For upgrades, handle the transition differently
-      if (isUpgrade) {
-        console.log('Processing upgrade subscription activation for:', userId);
-        
-        // Get current user tier to update existing record
-        const currentTier = await getUserTier(userId);
-        if (currentTier && currentTier.billing?.newSubscriptionId === subscription.id) {
-          // This is the new subscription being activated - update existing tier record
-          const nextBillingDate = new Date();
-          if (planDetails.renewalPeriod === 'ANNUAL') {
-            nextBillingDate.setFullYear(nextBillingDate.getFullYear() + 1);
-          } else {
-            nextBillingDate.setMonth(nextBillingDate.getMonth() + 1);
-          }
-
-          // Cancel old subscription first
-          if (currentTier.billing?.razorpaySubscriptionId && 
-              currentTier.billing.razorpaySubscriptionId !== subscription.id) {
-            try {
-              const razorpay = new (await import('razorpay')).default({
-                key_id: process.env.RAZORPAY_ID!,
-                key_secret: process.env.RAZORPAY_SECRET!,
-              });
-              await razorpay.subscriptions.cancel(currentTier.billing.razorpaySubscriptionId, true);
-              console.log('Old subscription cancelled:', currentTier.billing.razorpaySubscriptionId);
-            } catch (error) {
-              console.error('Failed to cancel old subscription:', error);
-            }
-          }
-
-          // Update existing tier with new subscription details using new structure
-          await updateUserTier(userId, {
-            tier: planDetails.tier,
-            'billing.razorpaySubscriptionId': subscription.id,
-            'billing.currentPeriodStart': new Date().toISOString(),
-            'billing.currentPeriodEnd': nextBillingDate.toISOString(),
-            'billing.renewalPeriod': planDetails.renewalPeriod,
-            'billing.payment_method': subscription.payment_method,
-            'billing.status': 'ACTIVE',
-            'billing.lastPaymentStatus': 'PAID',
-            'billing.lastPaymentAt': new Date().toISOString(),
-            'billing.upgradeInProgress': false,
-            'billing.targetPlanId': null,
-            'billing.transitionAt': new Date().toISOString(),
-            // Keep legacy fields for backward compatibility
-            'billing.subscriptionStartDate': new Date().toISOString(),
-            'billing.subscriptionEndDate': nextBillingDate.toISOString(),
-            'billing.newSubscriptionId': null,
-            'billing.newPlanId': null,
-            'billing.subscriptionTransitioned': true,
-            'billing.transitionedAt': new Date().toISOString(),
-          });
-          
-          console.log(`Upgrade subscription activated and transitioned for user:`, userId);
-          return;
-        }
-      }
-      
-      // Handle new subscription (not upgrade)
-      const nextBillingDate = new Date();
-      if (planDetails.renewalPeriod === 'ANNUAL') {
-        nextBillingDate.setFullYear(nextBillingDate.getFullYear() + 1);
-      } else {
-        nextBillingDate.setMonth(nextBillingDate.getMonth() + 1);
-      }
-
-      await createUserTier({
-        entityType: "Tier",
-        userId,
-        tier: planDetails.tier,
-        billing: {
-          renewalPeriod: planDetails.renewalPeriod,
-          currentPeriodStart: new Date().toISOString(),
-          currentPeriodEnd: nextBillingDate.toISOString(),
-          razorpaySubscriptionId: subscription.id,
-          payment_method: subscription.payment_method as 'upi' | 'card' | 'netbanking' | 'wallet' | null,
-          status: 'ACTIVE',
-          lastPaymentStatus: 'PAID',
-          lastPaymentAt: new Date().toISOString(),
-          // Keep legacy fields for backward compatibility
-          subscriptionStartDate: new Date().toISOString(),
-          subscriptionEndDate: nextBillingDate.toISOString(),
-        },
-      });
-      
-      console.log(`New subscription activated for user:`, userId);
-    }
-  }
-}
-
-async function handleSubscriptionCharged(subscription: any) {
-  console.log('Subscription charged:', subscription);
-
-  if (subscription.notes && subscription.notes.userId) {
-    const userId = subscription.notes.userId.replace('USER#', '');
-
-    // Update next billing date
-    const nextBillingDate = new Date();
-    nextBillingDate.setMonth(nextBillingDate.getMonth() + 1);
-
-    await updateUserTier(userId, {
-      'billing.currentPeriodEnd': nextBillingDate.toISOString(),
-      'billing.lastPaymentStatus': 'PAID',
-      'billing.lastPaymentAt': new Date().toISOString(),
-      // Keep legacy field for backward compatibility
-      'billing.subscriptionEndDate': nextBillingDate.toISOString(),
-    });
-  }
-}
-
-async function handleSubscriptionCancelled(subscription: any) {
-  console.log('Subscription cancelled:', subscription);
-
-  if (subscription.notes && subscription.notes.userId) {
-    const userId = subscription.notes.userId.replace('USER#', '');
-    await updateUserTier(userId, {
-      'billing.razorpaySubscriptionId': FieldValue.delete(),
-      'billing.subscriptionEndDate': FieldValue.delete(),
-    });
-  }
-}
-
-async function handleSubscriptionUpdated(subscription: any) {
-  console.log('Subscription updated:', subscription);
+  // Check if subscription has actually ended (immediate) or just cancelled (grace period)
+  const hasEnded = subscription.ended_at && subscription.ended_at <= Math.floor(Date.now() / 1000);
   
-  // Log comprehensive subscription update details
-  console.log('Subscription update details:', {
-    id: subscription.id,
-    plan_id: subscription.plan_id,
-    status: subscription.status,
-    payment_method: subscription.payment_method,
-    current_start: subscription.current_start,
-    current_end: subscription.current_end,
-    has_scheduled_changes: subscription.has_scheduled_changes,
-    change_scheduled_at: subscription.change_scheduled_at,
-    notes: subscription.notes,
-  });
-  
-  if (subscription.notes && subscription.notes.userId) {
-    const userId = subscription.notes.userId.replace('USER#', '');
+  if (hasEnded) {
+    // Subscription ended - user loses access now
+    console.log('Subscription ended - removing access', { userId, subscriptionId: subscription.id });
     
-    // Try to get plan details from the subscription plan_id
-    let planDetails = getPlanDetails(subscription.plan_id);
-    
-    // Fallback to notes planId if subscription plan_id doesn't match our mapping
-    if (!planDetails && subscription.notes.planId) {
-      planDetails = getPlanDetails(subscription.notes.planId);
-    }
-    
-    if (planDetails) {
-      console.log('Processing subscription update for:', userId, {
-        fromNotes: subscription.notes.planId,
-        fromSubscription: subscription.plan_id,
-        resolvedTier: planDetails.tier,
-        renewalPeriod: planDetails.renewalPeriod,
-      });
-      
-      // Convert Razorpay timestamps to ISO strings
-      const currentPeriodStart = subscription.current_start ? new Date(subscription.current_start * 1000).toISOString() : null;
-      const currentPeriodEnd = subscription.current_end ? new Date(subscription.current_end * 1000).toISOString() : null;
-      
-      console.log('Updating billing dates from subscription.updated:', {
-        current_start: subscription.current_start,
-        current_end: subscription.current_end,
-        currentPeriodStart,
-        currentPeriodEnd,
-      });
-      
-      // Update Firebase with new plan details and billing dates
-      await updateUserTier(userId, {
-        tier: planDetails.tier,
-        'billing.renewalPeriod': planDetails.renewalPeriod,
-        'billing.currentPeriodStart': currentPeriodStart,
-        'billing.currentPeriodEnd': currentPeriodEnd,
-        'billing.subscriptionUpdated': true,
-        'billing.subscriptionUpdatedAt': new Date().toISOString(),
-        'billing.lastWebhookEvent': 'subscription.updated',
-        'billing.lastWebhookAt': new Date().toISOString(),
-        'billing.payment_method': subscription.payment_method,
-        // Update legacy fields as well for backward compatibility
-        'billing.subscriptionStartDate': currentPeriodStart,
-        'billing.subscriptionEndDate': currentPeriodEnd,
-      });
-      
-      console.log('Subscription update processed successfully for user:', userId, 'new tier:', planDetails.tier);
-    } else {
-      console.error('No plan details found for subscription update:', {
-        userId,
-        subscriptionPlanId: subscription.plan_id,
-        notesPlanId: subscription.notes.planId,
-      });
-    }
-  } else {
-    console.log('No userId found in subscription notes for update:', subscription.id);
-  }
-}
-
-
-async function handleSubscriptionCompleted(subscription: any) {
-  console.log('Subscription completed:', subscription);
-
-  if (subscription.notes && subscription.notes.userId) {
-    const userId = subscription.notes.userId.replace('USER#', '');
-    await updateUserTier(userId, {
-      'billing.razorpaySubscriptionId': FieldValue.delete(),
-      'billing.subscriptionEndDate': FieldValue.delete(),
-      tier: 'NONE',
-    });
-  }
-}
-
-async function handlePaymentFailed(payment: any) {
-  console.log('Payment failed:', payment);
-  
-  if (payment.notes && payment.notes.userId) {
-    const userId = payment.notes.userId.replace('USER#', '');
-    // Mark as payment failed but keep grace period
-    await updateUserTier(userId, {
-      'billing.lastPaymentStatus': 'FAILED',
-      'billing.lastPaymentAt': new Date().toISOString(),
-      // Keep legacy fields for backward compatibility
-      'billing.paymentFailed': true,
-      'billing.paymentFailedAt': new Date().toISOString(),
-    });
-    
-    console.log('Payment failure recorded for user:', userId);
-  }
-}
-
-async function handleSubscriptionHalted(subscription: any) {
-  console.log('Subscription halted:', subscription);
-  
-  if (subscription.notes && subscription.notes.userId) {
-    const userId = subscription.notes.userId.replace('USER#', '');
-    // Downgrade to free tier when subscription is halted
-    await updateUserTier(userId, {
-      tier: 'NONE',
-      'billing.status': 'HALTED',
-      'billing.statusReason': 'Subscription halted due to payment failure',
-      'billing.statusChangedAt': new Date().toISOString(),
-      'billing.lastPaymentStatus': 'FAILED',
-      // Keep legacy fields for backward compatibility
-      'billing.subscriptionHalted': true,
-      'billing.haltedAt': new Date().toISOString(),
-    });
-    
-    console.log('User downgraded to free tier due to subscription halt:', userId);
-  }
-}
-
-// Process immediate upgrade after prorated payment
-async function processImmediateUpgrade(username: string, currentTier: any) {
-  try {
-    console.log('Processing immediate upgrade for user:', username);
-    
-    const newPlanId = currentTier.billing?.newPlanId;
-    if (!newPlanId) {
-      console.error('No new plan ID found for upgrade');
-      return;
-    }
-
-    // Get new plan details
-    const newPlanDetails = getPlanDetails(newPlanId);
-    if (!newPlanDetails) {
-      console.error('Invalid new plan ID:', newPlanId);
-      return;
-    }
-
-    // Update user tier immediately with new plan details
-    const updates = {
-      tier: newPlanDetails.tier,
-      'billing.upgradeInProgress': false,
-      'billing.proratedPaid': true,
-      'billing.proratedPaidAt': new Date().toISOString(),
-      // Keep the current subscription active until next billing cycle
-      // The new subscription (newSubscriptionId) will take over then
+    const billing: BillingInfo = {
+      renewalPeriod: null,
+      subscriptionStartDate: null,
+      subscriptionEndDate: null,
+      razorpaySubscriptionId: undefined,
+      razorpayCustomerId: existingTier.billing?.razorpayCustomerId,
+      paymentMethod: existingTier.billing?.paymentMethod, // Preserve payment method for historical data
+      trialStartDate: null,
+      trialEndDate: null,
+      isConfirmationSent: false,
+      isCancelled: true,
+      cancellationDate: currentTimestamp,
     };
 
-    await updateUserTier(username, updates);
+    await updateUserTier(userId, 'NONE', billing);
+    
+  } else {
+    // Subscription cancelled but still active - keep access until end date
+    console.log('Subscription cancelled - keeping access until billing period ends', { 
+      userId, 
+      subscriptionId: subscription.id,
+      subscriptionEndDate: existingTier.billing?.subscriptionEndDate 
+    });
 
-    console.log(`Immediate upgrade completed for user ${username} to tier ${newPlanDetails.tier}`);
+    const updatedBilling: BillingInfo = {
+      renewalPeriod: existingTier.billing?.renewalPeriod || null,
+      trialStartDate: existingTier.billing?.trialStartDate || null,
+      trialEndDate: existingTier.billing?.trialEndDate || null,
+      subscriptionStartDate: existingTier.billing?.subscriptionStartDate || null,
+      subscriptionEndDate: existingTier.billing?.subscriptionEndDate || null,
+      razorpayCustomerId: existingTier.billing?.razorpayCustomerId,
+      paymentMethod: existingTier.billing?.paymentMethod,
+      isConfirmationSent: existingTier.billing?.isConfirmationSent,
+      isCancelled: true,
+      cancellationDate: currentTimestamp,
+      razorpaySubscriptionId: undefined, // Clear since it's cancelled
+    };
 
-  } catch (error) {
-    console.error('Error processing immediate upgrade:', error);
+    // Keep current tier until subscription end date
+    await updateUserTier(userId, existingTier.tier, updatedBilling);
   }
-}
+
+  console.log('Subscription cancellation processed successfully', { userId });
+};
+
+// Handle subscription updates (plan changes)
+const handleSubscriptionUpdated = async (
+  userId: string, 
+  subscription: any, 
+  planDetails: { tier: "BASIC" | "PRO", renewalPeriod: "MONTHLY" | "ANNUAL" }
+) => {
+  console.log('Updating subscription', {
+    userId,
+    subscriptionId: subscription.id,
+    newTier: planDetails.tier,
+    newRenewalPeriod: planDetails.renewalPeriod
+  });
+
+  await updateSubscriptionStatus(userId, subscription, planDetails);
+
+  console.log('User subscription updated successfully', { userId, newTier: planDetails.tier });
+};

@@ -19,94 +19,44 @@ if (getApps().length === 0) {
 
 export const db = getFirestore(app);
 
+export interface BillingInfo {
+  renewalPeriod: "MONTHLY" | "ANNUAL" | null;
+  trialStartDate: string | null; // UTC ISO - when 7-day trial started
+  trialEndDate: string | null; // UTC ISO - when 7-day trial ends
+  subscriptionStartDate: string | null; // UTC ISO - when paid subscription started
+  subscriptionEndDate: string | null; // UTC ISO - when subscription expires
+  razorpaySubscriptionId?: string; // Razorpay subscription ID for management
+  razorpayCustomerId?: string; // Razorpay customer ID
+  paymentMethod?: string; // Payment method used (upi, card, netbanking, wallet, etc.)
+  isConfirmationSent?: boolean; // Track if subscription confirmation message was sent
+  // Simple cancellation support
+  isCancelled?: boolean; // Whether subscription is cancelled but still active
+  cancellationDate?: string; // When subscription was cancelled
+}
+
+export interface TierEntity {
+  PK: string; // USER#{userId}
+  SK: string; // TIER
+  entityType: "Tier";
+  userId: string;
+  tier: "NONE" | "BASIC" | "PRO" | "TRIAL";
+  expiryTTL?: number; // Unix timestamp for DynamoDB TTL (only for TRIAL)
+  billing?: BillingInfo;
+  createdAt: string; // UTC ISO
+  updatedAt: string; // UTC ISO
+}
+
 export interface UserTierInfo {
   username: string;
   hasSubscription: boolean;
-
   tierEntity?: {
     tier: "NONE" | "BASIC" | "PRO" | "TRIAL";
-
-    billing?: {
-      renewalPeriod: "MONTHLY" | "ANNUAL" | null;
-
-      // Lifecycle dates
-      currentPeriodStart: string | null;   // e.g. 2025-08-01
-      currentPeriodEnd: string | null;     // e.g. 2025-08-31
-
-      // Razorpay identifiers
-      razorpaySubscriptionId?: string;
-      razorpayCustomerId?: string;
-
-      // Payment method from subscription authenticated event
-      payment_method?: 'upi' | 'card' | 'netbanking' | 'wallet' | null;
-
-      // Payment state
-      lastPaymentStatus?: "PAID" | "FAILED" | "PENDING";
-      lastPaymentAt?: string | null;
-
-      // Cancellation / Halt
-      status?: "ACTIVE" | "HALTED" | "CANCELLED";
-      statusReason?: string | null;
-      statusChangedAt?: string | null;
-
-      // Upgrade/Downgrade
-      upgradeInProgress?: boolean;
-      targetPlanId?: string | null;
-      transitionAt?: string | null;
-    };
-
-    createdAt: string;
+    billing?: BillingInfo;
     updatedAt: string;
   };
 }
 
-// Legacy interface for backward compatibility during transition
-export interface TierEntity {
-  entityType: "Tier";
-  userId: string;
-  tier: "NONE" | "BASIC" | "PRO" | "TRIAL";
-  billing?: {
-    renewalPeriod: "MONTHLY" | "ANNUAL" | null;
-    currentPeriodStart?: string | null;
-    currentPeriodEnd?: string | null;
-    razorpaySubscriptionId?: string;
-    razorpayCustomerId?: string;
-    payment_method?: 'upi' | 'card' | 'netbanking' | 'wallet' | null;
-    lastPaymentStatus?: "PAID" | "FAILED" | "PENDING";
-    lastPaymentAt?: string | null;
-    status?: "ACTIVE" | "HALTED" | "CANCELLED";
-    statusReason?: string | null;
-    statusChangedAt?: string | null;
-    upgradeInProgress?: boolean;
-    targetPlanId?: string | null;
-    transitionAt?: string | null;
-    // Legacy fields for migration
-    subscriptionStartDate?: string | null;
-    subscriptionEndDate?: string | null;
-    isConfirmationSent?: boolean;
-    isCancelled?: boolean;
-    cancellationReason?: string;
-    cancelledAt?: string;
-    newPlanId?: string;
-    newSubscriptionId?: string;
-    proratedAmount?: number;
-    proratedOrderId?: string;
-    proratedPaid?: boolean;
-    proratedPaidAt?: string;
-    subscriptionTransitioned?: boolean;
-    transitionedAt?: string;
-    mandateAuthenticated?: boolean;
-    mandateAuthenticatedAt?: string;
-    paymentFailed?: boolean;
-    paymentFailedAt?: string;
-    subscriptionHalted?: boolean;
-    haltedAt?: string;
-  };
-  createdAt: string;
-  updatedAt: string;
-}
-
-export const createUserTier = async (data: Omit<TierEntity, 'createdAt' | 'updatedAt'>) => {
+export const createUserTier = async (data: Omit<TierEntity, 'updatedAt' | 'createdAt'>) => {
   const now = new Date().toISOString();
   const tierData: TierEntity = {
     ...data,
@@ -119,7 +69,39 @@ export const createUserTier = async (data: Omit<TierEntity, 'createdAt' | 'updat
   return docRef.id;
 };
 
+// Update user tier - matches webhook pattern
 export const updateUserTier = async (
+  userId: string, 
+  tier: "NONE" | "BASIC" | "PRO" | "TRIAL",
+  billing?: BillingInfo
+) => {
+  const now = new Date().toISOString();
+
+  // Get user tier document (should be only one per user)
+  const querySnapshot = await db.collection('tier')
+    .where('PK', '==', `USER#${userId}`)
+    .where('SK', '==', 'TIER')
+    .get();
+
+  if (querySnapshot.empty) {
+    console.error('No user tier found for userId:', userId);
+    return null;
+  }
+
+  const docId = querySnapshot.docs[0].id;
+  const updatedData: Partial<TierEntity> = {
+    tier,
+    ...(billing && { billing }),
+    updatedAt: now,
+  };
+
+  await db.collection('tier').doc(docId).update(updatedData);
+  console.log('User tier updated for docId:', docId);
+  return docId;
+};
+
+// Generic update function for backward compatibility
+export const updateUserTierGeneric = async (
   userId: string, 
   updates: Partial<TierEntity> | Record<string, any>
 ) => {
@@ -131,7 +113,8 @@ export const updateUserTier = async (
 
   // Get user tier document (should be only one per user)
   const querySnapshot = await db.collection('tier')
-    .where('userId', '==', userId)
+    .where('PK', '==', `USER#${userId}`)
+    .where('SK', '==', 'TIER')
     .get();
 
   if (querySnapshot.empty) {
@@ -147,7 +130,8 @@ export const updateUserTier = async (
 
 export const getUserTier = async (userId: string) => {
   const querySnapshot = await db.collection('tier')
-    .where('userId', '==', userId)
+    .where('PK', '==', `USER#${userId}`)
+    .where('SK', '==', 'TIER')
     .get();
 
   if (querySnapshot.empty) {
@@ -161,25 +145,26 @@ export const getUserTier = async (userId: string) => {
   } as TierEntity & { id: string };
 };
 
+// Alias for webhook compatibility  
+export const getTierById = async (userId: string) => {
+  return await getUserTier(userId);
+};
+
 export const cancelUserSubscription = async (userId: string, reason: string = 'cancelled') => {
   try {
     const querySnapshot = await db.collection('tier')
-      .where('userId', '==', userId)
+      .where('PK', '==', `USER#${userId}`)
+      .where('SK', '==', 'TIER')
       .get();
 
     if (!querySnapshot.empty) {
       const docId = querySnapshot.docs[0].id;
       const tierData = querySnapshot.docs[0].data() as TierEntity;
       
-      // Update with new structure
+      // Update with simplified structure
       await db.collection('tier').doc(docId).update({
-        'billing.status': 'CANCELLED',
-        'billing.statusReason': reason,
-        'billing.statusChangedAt': new Date().toISOString(),
-        // Keep legacy fields for backward compatibility
-        'billing.cancellationReason': reason,
-        'billing.cancelledAt': new Date().toISOString(),
         'billing.isCancelled': true,
+        'billing.cancellationDate': new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       });
       
@@ -193,11 +178,12 @@ export const cancelUserSubscription = async (userId: string, reason: string = 'c
   return null;
 };
 
-// New function to get user tier info in the preferred format
+// Get user tier info in the simplified format
 export const getUserBilling = async (userId: string): Promise<UserTierInfo | null> => {
   try {
     const querySnapshot = await db.collection('tier')
-      .where('userId', '==', userId)
+      .where('PK', '==', `USER#${userId}`)
+      .where('SK', '==', 'TIER')
       .get();
 
     if (querySnapshot.empty) {
@@ -210,20 +196,12 @@ export const getUserBilling = async (userId: string): Promise<UserTierInfo | nul
     const tierDoc = querySnapshot.docs[0];
     const tierData = tierDoc.data() as TierEntity;
 
-    // Transform legacy data to new structure
-    // Determine if user has active subscription based on multiple factors
+    // Determine if user has active subscription
     const hasActiveSubscription = Boolean(
-      tierData.billing && (
-        // Has razorpay subscription ID
-        tierData.billing.razorpaySubscriptionId ||
-        // Or has active paid tier that's not NONE or TRIAL
-        (
-          (tierData.tier === 'BASIC' || tierData.tier === 'PRO') &&
-          (tierData.billing.status === 'ACTIVE' || !tierData.billing.status) &&
-          !tierData.billing.isCancelled &&
-          !tierData.billing.subscriptionHalted
-        )
-      )
+      tierData.billing && 
+      tierData.billing.razorpaySubscriptionId &&
+      !tierData.billing.isCancelled &&
+      (tierData.tier === 'BASIC' || tierData.tier === 'PRO')
     );
 
     const userTierInfo: UserTierInfo = {
@@ -232,39 +210,18 @@ export const getUserBilling = async (userId: string): Promise<UserTierInfo | nul
       tierEntity: {
         tier: tierData.tier,
         billing: tierData.billing ? {
-          renewalPeriod: tierData.billing.renewalPeriod,
-          
-          // Map legacy dates to new structure
-          currentPeriodStart: tierData.billing.subscriptionStartDate || tierData.billing.currentPeriodStart || null,
-          currentPeriodEnd: tierData.billing.subscriptionEndDate || tierData.billing.currentPeriodEnd || null,
-          
-          razorpaySubscriptionId: tierData.billing.razorpaySubscriptionId,
+          cancellationDate: tierData.billing.cancellationDate,
+          isCancelled: tierData.billing.isCancelled,
+          isConfirmationSent: tierData.billing.isConfirmationSent,
+          paymentMethod: tierData.billing.paymentMethod,
           razorpayCustomerId: tierData.billing.razorpayCustomerId,
-          
-          // Payment method
-          payment_method: tierData.billing.payment_method,
-          
-          // Map payment status
-          lastPaymentStatus: tierData.billing.paymentFailed 
-            ? "FAILED" 
-            : tierData.billing.lastPaymentStatus || "PAID",
-          lastPaymentAt: tierData.billing.lastPaymentAt || null,
-          
-          // Map subscription status
-          status: tierData.billing.subscriptionHalted 
-            ? "HALTED" 
-            : tierData.billing.isCancelled 
-              ? "CANCELLED" 
-              : tierData.billing.status || "ACTIVE",
-          statusReason: tierData.billing.statusReason || tierData.billing.cancellationReason || null,
-          statusChangedAt: tierData.billing.statusChangedAt || tierData.billing.cancelledAt || tierData.billing.haltedAt || null,
-          
-          // Upgrade/Downgrade info
-          upgradeInProgress: tierData.billing.upgradeInProgress,
-          targetPlanId: tierData.billing.newPlanId || tierData.billing.targetPlanId || null,
-          transitionAt: tierData.billing.transitionedAt || tierData.billing.transitionAt || null,
+          razorpaySubscriptionId: tierData.billing.razorpaySubscriptionId,
+          renewalPeriod: tierData.billing.renewalPeriod,
+          subscriptionEndDate: tierData.billing.subscriptionEndDate,
+          subscriptionStartDate: tierData.billing.subscriptionStartDate,
+          trialEndDate: tierData.billing.trialEndDate,
+          trialStartDate: tierData.billing.trialStartDate,
         } : undefined,
-        createdAt: tierData.createdAt,
         updatedAt: tierData.updatedAt,
       }
     };

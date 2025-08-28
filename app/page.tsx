@@ -152,6 +152,10 @@ export default function Home() {
     try {
       console.log('Processing plan change...');
       
+      // Determine target tier and renewal period from plan
+      const targetTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
+      const targetRenewalPeriod = plan.duration === 'yearly' ? 'ANNUAL' : 'MONTHLY';
+      
       const response = await fetch('/api/change-plan', {
         method: 'POST',
         headers: {
@@ -159,7 +163,8 @@ export default function Home() {
         },
         body: JSON.stringify({
           username: username,
-          newPlanId: plan.razorpayPlanId,
+          targetTier: targetTier as 'BASIC' | 'PRO',
+          targetRenewalPeriod: targetRenewalPeriod as 'MONTHLY' | 'ANNUAL',
         }),
       });
 

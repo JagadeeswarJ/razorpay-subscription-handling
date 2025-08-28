@@ -305,7 +305,7 @@ const updateSubscriptionStatus = async (
     trialEndDate: null,
     // Clear cancellation fields since user is resubscribing
     isCancelled: false,
-    cancellationDate: undefined,
+    cancellationDate: null,
     // Always preserve existing isConfirmationSent flag
     ...(existingIsConfirmationSent !== undefined && { isConfirmationSent: existingIsConfirmationSent })
   };
@@ -338,7 +338,7 @@ const handleSubscriptionCancelled = async (userId: string, subscription: any) =>
       renewalPeriod: null,
       subscriptionStartDate: null,
       subscriptionEndDate: null,
-      razorpaySubscriptionId: undefined,
+      razorpaySubscriptionId: null,
       razorpayCustomerId: existingTier.billing?.razorpayCustomerId,
       paymentMethod: existingTier.billing?.paymentMethod, // Preserve payment method for historical data
       trialStartDate: null,
@@ -369,7 +369,7 @@ const handleSubscriptionCancelled = async (userId: string, subscription: any) =>
       isConfirmationSent: existingTier.billing?.isConfirmationSent,
       isCancelled: true,
       cancellationDate: currentTimestamp,
-      razorpaySubscriptionId: undefined, // Clear since it's cancelled
+      razorpaySubscriptionId: null, // Clear since it's cancelled
     };
 
     // Keep current tier until subscription end date

@@ -25,13 +25,13 @@ export interface BillingInfo {
   trialEndDate: string | null; // UTC ISO - when 7-day trial ends
   subscriptionStartDate: string | null; // UTC ISO - when paid subscription started
   subscriptionEndDate: string | null; // UTC ISO - when subscription expires
-  razorpaySubscriptionId?: string; // Razorpay subscription ID for management
+  razorpaySubscriptionId?: string | null; // Razorpay subscription ID for management
   razorpayCustomerId?: string; // Razorpay customer ID
   paymentMethod?: string; // Payment method used (upi, card, netbanking, wallet, etc.)
   isConfirmationSent?: boolean; // Track if subscription confirmation message was sent
   // Simple cancellation support
   isCancelled?: boolean; // Whether subscription is cancelled but still active
-  cancellationDate?: string; // When subscription was cancelled
+  cancellationDate?: string | null; // When subscription was cancelled
 }
 
 export interface TierEntity {

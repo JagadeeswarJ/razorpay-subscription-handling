@@ -21,34 +21,18 @@ interface UserTierInfo {
 
     billing?: {
       renewalPeriod: "MONTHLY" | "ANNUAL" | null;
-
-      // Lifecycle dates
-      currentPeriodStart: string | null;
-      currentPeriodEnd: string | null;
-
-      // Razorpay identifiers
-      razorpaySubscriptionId?: string;
+      trialStartDate: string | null;
+      trialEndDate: string | null;
+      subscriptionStartDate: string | null;
+      subscriptionEndDate: string | null;
+      razorpaySubscriptionId?: string | null;
       razorpayCustomerId?: string;
-
-      // Payment method from subscription authenticated event
-      payment_method?: 'upi' | 'card' | 'netbanking' | 'wallet' | null;
-
-      // Payment state
-      lastPaymentStatus?: "PAID" | "FAILED" | "PENDING";
-      lastPaymentAt?: string | null;
-
-      // Cancellation / Halt
-      status?: "ACTIVE" | "HALTED" | "CANCELLED";
-      statusReason?: string | null;
-      statusChangedAt?: string | null;
-
-      // Upgrade/Downgrade
-      upgradeInProgress?: boolean;
-      targetPlanId?: string | null;
-      transitionAt?: string | null;
+      paymentMethod?: string;
+      isConfirmationSent?: boolean;
+      isCancelled?: boolean;
+      cancellationDate?: string | null;
     };
 
-    createdAt: string;
     updatedAt: string;
   };
 }
@@ -141,41 +125,18 @@ export default function Home() {
   const handleSubscribe = async (plan: SubscriptionPlan) => {
     console.log('Handling subscription for plan:', plan.id);
 
-    // Check if user has active subscription and this is an upgrade
+    // Check if user has active subscription - if so, this is a plan change
     if (userBilling?.hasSubscription && userBilling.tierEntity) {
-      const currentTier = userBilling.tierEntity.tier;
-      const currentRenewalPeriod = userBilling.tierEntity.billing?.renewalPeriod;
-      const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
-      const newRenewalPeriod = plan.duration === 'yearly' ? 'ANNUAL' : 'MONTHLY';
-      
-      // Check if this is a valid upgrade path
-      const isValidUpgrade = (
-        // BASIC to PRO upgrades (any billing period combination)
-        (currentTier === 'BASIC' && newTier === 'PRO') ||
-        // Plan period changes (same tier, MONTHLY to ANNUAL)
-        (currentTier === newTier && currentRenewalPeriod === 'MONTHLY' && newRenewalPeriod === 'ANNUAL')
-      );
-      
-      if (isValidUpgrade && (currentTier === 'BASIC' || currentTier === 'PRO')) {
-        // This is a valid upgrade - handle via upgrade API
-        await handleUpgrade(plan);
-        return;
-      }
-      
-      // Handle downgrades if needed (PRO to BASIC - currently disabled)
-      if (currentTier === 'PRO' && newTier === 'BASIC') {
-        // This is a downgrade - handle via downgrade API
-        await handleDowngrade(plan);
-        return;
-      }
+      await handleChangePlan(plan);
+      return;
     }
 
-    // Simple buy logic - redirect to payment page
+    // New subscription - redirect to payment page
     const paymentUrl = `/payment?username=${encodeURIComponent(username)}&planId=${encodeURIComponent(plan.razorpayPlanId)}`;
     window.location.href = paymentUrl;
   };
 
-  const handleUpgrade = async (plan: SubscriptionPlan) => {
+  const handleChangePlan = async (plan: SubscriptionPlan) => {
     if (!userBilling?.hasSubscription || !userBilling?.tierEntity) {
       setUpgradeStatus({
         show: true,
@@ -189,87 +150,9 @@ export default function Home() {
     setUpgradeStatus(null);
     
     try {
-      console.log('Processing upgrade...');
+      console.log('Processing plan change...');
       
-      // Determine target tier and renewal period from plan
-      const targetTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
-      const targetRenewalPeriod = plan.duration === 'yearly' ? 'ANNUAL' : 'MONTHLY';
-      
-      const response = await fetch('/api/upgrade-subscription', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          username: username,
-          targetTier: targetTier as 'BASIC' | 'PRO',
-          targetRenewalPeriod: targetRenewalPeriod as 'MONTHLY' | 'ANNUAL',
-        }),
-      });
-
-      const result = await response.json();
-      
-      if (response.ok && result.success) {
-        if (result.proratedPayment && result.proratedAmount > 0) {
-          setUpgradeStatus({
-            show: true,
-            message: `Upgrade requires prorated payment of ₹${result.proratedAmount}`,
-            type: 'info',
-            proratedAmount: result.proratedAmount,
-            paymentOrderId: result.proratedPayment.orderId
-          });
-        } else if (result.checkoutUrl && result.requiresAuthentication) {
-          // UPI upgrade with checkout URL for mandate authentication
-          setUpgradeStatus({
-            show: true,
-            message: result.message || 'UPI upgrade initiated! Click below to complete mandate setup.',
-            type: 'info',
-            checkoutUrl: result.checkoutUrl
-          });
-        } else {
-          setUpgradeStatus({
-            show: true,
-            message: result.message || 'Upgrade completed successfully!',
-            type: 'success'
-          });
-        }
-        await fetchUserBilling(username);
-      } else {
-        setUpgradeStatus({
-          show: true,
-          message: result.error || 'Failed to upgrade subscription',
-          type: 'error'
-        });
-      }
-    } catch (error) {
-      console.error('Upgrade error:', error);
-      setUpgradeStatus({
-        show: true,
-        message: 'Failed to upgrade subscription. Please try again.',
-        type: 'error'
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleDowngrade = async (plan: SubscriptionPlan) => {
-    if (!userBilling?.tierEntity?.billing?.razorpaySubscriptionId) {
-      setUpgradeStatus({
-        show: true,
-        message: 'No active subscription found',
-        type: 'error'
-      });
-      return;
-    }
-
-    setLoading(true);
-    setUpgradeStatus(null);
-    
-    try {
-      console.log('Processing downgrade...');
-      
-      const response = await fetch('/api/downgrade-subscription', {
+      const response = await fetch('/api/change-plan', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -277,7 +160,6 @@ export default function Home() {
         body: JSON.stringify({
           username: username,
           newPlanId: plan.razorpayPlanId,
-          currentSubscriptionId: userBilling.tierEntity.billing.razorpaySubscriptionId,
         }),
       });
 
@@ -286,28 +168,29 @@ export default function Home() {
       if (response.ok && result.success) {
         setUpgradeStatus({
           show: true,
-          message: result.message || 'Downgrade processed successfully!',
+          message: result.message || 'Plan changed successfully!',
           type: 'success'
         });
         await fetchUserBilling(username);
       } else {
         setUpgradeStatus({
           show: true,
-          message: result.error || 'Failed to downgrade subscription',
+          message: result.error || 'Failed to change plan',
           type: 'error'
         });
       }
     } catch (error) {
-      console.error('Downgrade error:', error);
+      console.error('Plan change error:', error);
       setUpgradeStatus({
         show: true,
-        message: 'Failed to downgrade subscription. Please try again.',
+        message: 'Failed to change plan. Please try again.',
         type: 'error'
       });
     } finally {
       setLoading(false);
     }
   };
+
 
   const handleCancel = async () => {
     if (!userBilling?.tierEntity?.billing?.razorpaySubscriptionId) {
@@ -319,8 +202,8 @@ export default function Home() {
       return;
     }
 
-    const endDate = userBilling.tierEntity.billing?.currentPeriodEnd 
-      ? new Date(userBilling.tierEntity.billing.currentPeriodEnd).toLocaleDateString()
+    const endDate = userBilling.tierEntity.billing?.subscriptionEndDate 
+      ? new Date(userBilling.tierEntity.billing.subscriptionEndDate).toLocaleDateString()
       : 'current period end';
 
     const confirmMessage = `Are you sure you want to cancel your subscription? You can continue using the service until ${endDate}, then it will stop automatically. No further charges will be made.`;
@@ -444,9 +327,9 @@ export default function Home() {
     const isYearly = plan.duration === 'yearly';
     const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
     
-    // Check if user has an active subscription based on hasSubscription flag and status
+    // Check if user has an active subscription based on hasSubscription flag and cancellation status
     const isActiveSubscription = Boolean(userBilling?.hasSubscription && 
-                                         userBilling?.tierEntity?.billing?.status === 'ACTIVE');
+                                         !userBilling?.tierEntity?.billing?.isCancelled);
     
     if (!isActiveSubscription) return "Subscribe Now";
     
@@ -456,15 +339,8 @@ export default function Home() {
       return "Current Plan";
     }
     
-    // Check for upgrades
-    if (currentTier === 'BASIC' && newTier === 'PRO') return "Upgrade";
-    if (currentTier === newTier && currentRenewal === 'MONTHLY' && isYearly) return "Switch to Yearly";
-    
-    // Check for downgrades
-    if (currentTier === 'PRO' && newTier === 'BASIC') return "Downgrade";
-    if (currentTier === newTier && currentRenewal === 'ANNUAL' && !isYearly) return "Switch to Monthly";
-    
-    return "Subscribe Now";
+    // All other cases are plan changes
+    return "Change Plan";
   };
 
   const isButtonDisabled = (plan: SubscriptionPlan): boolean => {
@@ -477,9 +353,9 @@ export default function Home() {
     const isYearly = plan.duration === 'yearly';
     const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
     
-    // Check if user has an active subscription based on hasSubscription flag and status
+    // Check if user has an active subscription based on hasSubscription flag and cancellation status
     const isActiveSubscription = Boolean(userBilling?.hasSubscription && 
-                                         userBilling?.tierEntity?.billing?.status === 'ACTIVE');
+                                         !userBilling?.tierEntity?.billing?.isCancelled);
     
     // Disable if it's the current plan or if subscription is not active
     return isActiveSubscription && 
@@ -512,19 +388,23 @@ export default function Home() {
               </span>
             </div>
             
-            {userBilling?.hasSubscription && userBilling?.tierEntity?.billing?.status && (
+            {userBilling?.hasSubscription && (
               <>
                 <div className="w-px h-6 bg-gray-300"></div>
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-gray-600">Status:</span>
                   <span className={`px-3 py-1 rounded-full text-sm font-semibold ${
-                    userBilling?.tierEntity?.billing?.status === 'ACTIVE' 
+                    userBilling?.hasSubscription && !userBilling?.tierEntity?.billing?.isCancelled
                       ? 'bg-green-100 text-green-800' 
-                      : userBilling?.tierEntity?.billing?.status === 'HALTED'
-                        ? 'bg-yellow-100 text-yellow-800'
-                        : 'bg-red-100 text-red-800'
+                      : userBilling?.tierEntity?.billing?.isCancelled
+                        ? 'bg-red-100 text-red-800'
+                        : 'bg-gray-100 text-gray-800'
                   }`}>
-                    {userBilling?.tierEntity?.billing?.status}
+                    {userBilling?.hasSubscription && !userBilling?.tierEntity?.billing?.isCancelled
+                      ? 'ACTIVE'
+                      : userBilling?.tierEntity?.billing?.isCancelled
+                        ? 'CANCELLED'
+                        : 'INACTIVE'}
                   </span>
                 </div>
               </>
@@ -542,38 +422,29 @@ export default function Home() {
               </>
             )}
             
-            {userBilling?.tierEntity?.billing?.payment_method && (
+            {userBilling?.tierEntity?.billing?.paymentMethod && (
               <>
                 <div className="w-px h-6 bg-gray-300"></div>
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium text-gray-600">Payment:</span>
                   <span className={`px-3 py-1 rounded-full text-sm font-medium ${
-                    userBilling?.tierEntity?.billing?.payment_method === 'upi' 
+                    userBilling?.tierEntity?.billing?.paymentMethod === 'upi' 
                       ? 'bg-orange-100 text-orange-700' 
-                      : userBilling?.tierEntity?.billing?.payment_method === 'card'
+                      : userBilling?.tierEntity?.billing?.paymentMethod === 'card'
                         ? 'bg-blue-100 text-blue-700'
-                        : userBilling?.tierEntity?.billing?.payment_method === 'netbanking'
+                        : userBilling?.tierEntity?.billing?.paymentMethod === 'netbanking'
                           ? 'bg-green-100 text-green-700'
-                          : userBilling?.tierEntity?.billing?.payment_method === 'wallet'
+                          : userBilling?.tierEntity?.billing?.paymentMethod === 'wallet'
                             ? 'bg-purple-100 text-purple-700'
                             : 'bg-gray-100 text-gray-700'
                   }`}>
-                    {userBilling?.tierEntity?.billing?.payment_method?.toUpperCase()}
+                    {userBilling?.tierEntity?.billing?.paymentMethod?.toUpperCase()}
                   </span>
                 </div>
               </>
             )}
           </div>
           
-          {userBilling?.tierEntity?.billing?.upgradeInProgress && (
-            <div className="mt-3 inline-flex items-center gap-2 px-4 py-2 bg-orange-100 text-orange-800 rounded-lg">
-              <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-              <span className="text-sm font-medium">Upgrade in progress...</span>
-            </div>
-          )}
         </div>
 
         {/* Status Notification */}
@@ -681,47 +552,49 @@ export default function Home() {
                     <div className="flex justify-between">
                       <span className="text-gray-600">Status:</span>
                       <span className={`font-semibold ${
-                        userBilling?.tierEntity?.billing?.status === 'ACTIVE' 
+                        userBilling?.hasSubscription && !userBilling?.tierEntity?.billing?.isCancelled
                           ? 'text-green-600'
-                          : userBilling?.tierEntity?.billing?.status === 'CANCELLED'
-                            ? 'text-orange-600'
-                          : userBilling?.tierEntity?.billing?.status === 'HALTED'
+                          : userBilling?.tierEntity?.billing?.isCancelled
                             ? 'text-red-600'
                             : 'text-gray-600'
                       }`}>
-                        {userBilling?.tierEntity?.billing?.status || 'INACTIVE'}
+                        {userBilling?.hasSubscription && !userBilling?.tierEntity?.billing?.isCancelled
+                          ? 'ACTIVE'
+                          : userBilling?.tierEntity?.billing?.isCancelled
+                            ? 'CANCELLED'
+                            : 'INACTIVE'}
                       </span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-gray-600">Next Billing:</span>
                       <span className="font-semibold text-gray-900">
-                        {userBilling?.tierEntity?.billing?.currentPeriodEnd 
-                          ? new Date(userBilling.tierEntity.billing.currentPeriodEnd).toLocaleDateString()
+                        {userBilling?.tierEntity?.billing?.subscriptionEndDate 
+                          ? new Date(userBilling.tierEntity.billing.subscriptionEndDate).toLocaleDateString()
                           : 'N/A'}
                       </span>
                     </div>
                     
-                    {userBilling?.tierEntity?.billing?.payment_method && (
+                    {userBilling?.tierEntity?.billing?.paymentMethod && (
                       <div className="flex justify-between">
                         <span className="text-gray-600">Payment Method:</span>
                         <span className={`font-semibold ${
-                          userBilling?.tierEntity?.billing?.payment_method === 'upi' 
+                          userBilling?.tierEntity?.billing?.paymentMethod === 'upi' 
                             ? 'text-orange-600' 
-                            : userBilling?.tierEntity?.billing?.payment_method === 'card'
+                            : userBilling?.tierEntity?.billing?.paymentMethod === 'card'
                               ? 'text-blue-600'
-                              : userBilling?.tierEntity?.billing?.payment_method === 'netbanking'
+                              : userBilling?.tierEntity?.billing?.paymentMethod === 'netbanking'
                                 ? 'text-green-600'
-                                : userBilling?.tierEntity?.billing?.payment_method === 'wallet'
+                                : userBilling?.tierEntity?.billing?.paymentMethod === 'wallet'
                                   ? 'text-purple-600'
                                   : 'text-gray-600'
                         }`}>
-                          {userBilling?.tierEntity?.billing?.payment_method?.toUpperCase()}
+                          {userBilling?.tierEntity?.billing?.paymentMethod?.toUpperCase()}
                         </span>
                       </div>
                     )}
                     
                     {/* Cancellation Button */}
-                    {userBilling?.tierEntity?.billing?.status === 'ACTIVE' && (
+                    {userBilling?.hasSubscription && !userBilling?.tierEntity?.billing?.isCancelled && (
                       <div className="mt-3 pt-3 border-t border-gray-300">
                         <button
                           onClick={handleCancel}
@@ -768,19 +641,7 @@ export default function Home() {
                                 ((currentRenewal === 'MONTHLY' && !isYearly) || (currentRenewal === 'ANNUAL' && isYearly))) {
                               return "✓ Your current plan";
                             }
-                            if (currentTier === 'BASIC' && newTier === 'PRO') {
-                              return "↗ Upgrade available";
-                            }
-                            if (currentTier === 'PRO' && newTier === 'BASIC') {
-                              return "↘ Downgrade option";
-                            }
-                            if (currentTier === newTier && currentRenewal === 'MONTHLY' && isYearly) {
-                              return "📅 Switch to yearly";
-                            }
-                            if (currentTier === newTier && currentRenewal === 'ANNUAL' && !isYearly) {
-                              return "📅 Switch to monthly";
-                            }
-                            return "";
+                            return "📋 Available plan change";
                           })()}
                         </div>
                       )}
@@ -811,9 +672,7 @@ export default function Home() {
                       className={`w-full py-2 px-4 rounded-lg font-semibold text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
                         getButtonText(plan) === 'Current Plan'
                           ? 'bg-gray-600 text-white'
-                          : getButtonText(plan) === 'Upgrade' || getButtonText(plan) === 'Switch to Yearly'
-                          ? 'bg-green-600 text-white hover:bg-green-700'
-                          : getButtonText(plan) === 'Downgrade' || getButtonText(plan) === 'Switch to Monthly'
+                          : getButtonText(plan) === 'Change Plan'
                           ? 'bg-orange-600 text-white hover:bg-orange-700'
                           : 'bg-blue-600 text-white hover:bg-blue-700'
                       }`}

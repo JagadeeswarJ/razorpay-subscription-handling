@@ -118,6 +118,10 @@ export async function POST(request: NextRequest) {
       planId: subscription.plan_id,
       status: subscription.status
     });
+    console.log("=".repeat(40))
+    console.log("webhook payload:"+subscription.id)
+    console.log(payload)
+    console.log("=".repeat(40))
 
     // Extract user ID from subscription notes
     let userId = subscription.notes?.userId;

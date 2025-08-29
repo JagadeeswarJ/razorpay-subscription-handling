@@ -119,7 +119,7 @@ export async function POST(request: NextRequest) {
       status: subscription.status
     });
     console.log("=".repeat(40))
-    console.log("webhook payload:"+subscription.id)
+    console.log("webhook payload:"+eventType)
     console.log(payload)
     console.log("=".repeat(40))
 
@@ -293,26 +293,33 @@ const updateSubscriptionStatus = async (
     paymentMethod: subscription.payment_method
   });
   
-  // Always preserve existing isConfirmationSent flag
+  // Get existing billing data to merge with updates
   const existingTier = await getTierById(userId);
-  const existingIsConfirmationSent = existingTier?.billing?.isConfirmationSent;
+  const existingBilling = existingTier?.billing || {};
   
-  const billing: BillingInfo = {
+  // Define the updates for this webhook event
+  const billingUpdates: Partial<BillingInfo> = {
     renewalPeriod: planDetails.renewalPeriod,
     subscriptionStartDate,
     subscriptionEndDate,
     razorpaySubscriptionId: subscription.id,
     razorpayCustomerId: subscription.customer_id,
-    paymentMethod: subscription.payment_method, // Store payment method from Razorpay
+    paymentMethod: subscription.payment_method,
     // Clear trial dates since user is now on paid plan
     trialStartDate: null,
     trialEndDate: null,
     // Clear cancellation fields since user is resubscribing
     isCancelled: false,
-    cancellationDate: null,
-    // Always preserve existing isConfirmationSent flag
-    ...(existingIsConfirmationSent !== undefined && { isConfirmationSent: existingIsConfirmationSent })
+    cancellationDate: null
   };
+
+
+  
+  // Merge existing billing with updates
+  const billing: BillingInfo = {
+    ...existingBilling,
+    ...billingUpdates
+  } as BillingInfo;
 
   await updateUserTier(userId, planDetails.tier, billing);
 };

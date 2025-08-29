@@ -331,8 +331,25 @@ const handleSubscriptionCancelled = async (userId: string, subscription: any) =>
   // Get existing tier to preserve subscription end date
   const existingTier = await getTierById(userId);
   if (!existingTier) {
-    console.error('No existing tier found for cancelled subscription', { userId, subscriptionId: subscription.id });
-    // Don't throw error - just log and continue to prevent webhook failure
+    console.log('No existing tier found for cancelled subscription - creating user with NONE tier', { userId, subscriptionId: subscription.id });
+    
+    // Create user with NONE tier and cancellation info
+    const billing: BillingInfo = {
+      renewalPeriod: null,
+      subscriptionStartDate: null,
+      subscriptionEndDate: null,
+      razorpaySubscriptionId: null,
+      razorpayCustomerId: subscription.customer_id,
+      paymentMethod: subscription.payment_method,
+      trialStartDate: null,
+      trialEndDate: null,
+      isConfirmationSent: false,
+      isCancelled: true,
+      cancellationDate: new Date().toISOString(),
+    };
+
+    await updateUserTier(userId, 'NONE', billing);
+    console.log('Created user with NONE tier for cancelled subscription', { userId });
     return;
   }
 

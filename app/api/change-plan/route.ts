@@ -229,17 +229,18 @@ export async function POST(request: NextRequest) {
 
     // Check payment method and route to appropriate flow
     if (paymentMethod === 'upi') {
-      return await handleUPIPlanChange(
-        username,
-        currentSubscriptionId || '',
-        newPlanId,
-        newPlanDetails,
-        currentTier,
-        razorpay,
-        billingEndDate,
-        changeType,
-        corsHeaders
-      );
+      return NextResponse.json({
+        success: false,
+        error: 'Plan change is not supported for UPI payment method',
+        message: 'Plan change is not supported for this payment method. Please contact support for more details.',
+        data: {
+          paymentMethod: 'upi',
+          supportRequired: true
+        }
+      }, {
+        status: 400,
+        headers: corsHeaders,
+      });
     }
 
     // Handle users without razorpaySubscriptionId (create new subscription)

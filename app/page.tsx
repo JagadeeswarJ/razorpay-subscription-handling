@@ -331,6 +331,7 @@ export default function Home() {
     const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
     const isYearly = plan.duration === 'yearly';
     const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
+    const paymentMethod = userBilling.tierEntity?.billing?.paymentMethod;
     
     // Check if user has an active subscription based on hasSubscription flag and cancellation status
     const isActiveSubscription = Boolean(userBilling?.hasSubscription && 
@@ -342,6 +343,11 @@ export default function Home() {
     if (currentTier === newTier && 
         ((currentRenewal === 'MONTHLY' && !isYearly) || (currentRenewal === 'ANNUAL' && isYearly))) {
       return "Current Plan";
+    }
+    
+    // Check if UPI payment method - disable plan changes
+    if (paymentMethod === 'upi') {
+      return "Not Supported";
     }
     
     // All other cases are plan changes
@@ -357,10 +363,18 @@ export default function Home() {
     const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
     const isYearly = plan.duration === 'yearly';
     const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
+    const paymentMethod = userBilling.tierEntity?.billing?.paymentMethod;
     
     // Check if user has an active subscription based on hasSubscription flag and cancellation status
     const isActiveSubscription = Boolean(userBilling?.hasSubscription && 
                                          !userBilling?.tierEntity?.billing?.isCancelled);
+    
+    // Disable if UPI payment method and not the current plan (plan changes not supported for UPI)
+    if (isActiveSubscription && paymentMethod === 'upi') {
+      const isCurrentPlan = currentTier === newTier &&
+        ((currentRenewal === 'MONTHLY' && !isYearly) || (currentRenewal === 'ANNUAL' && isYearly));
+      return !isCurrentPlan; // Disable all buttons except current plan for UPI users
+    }
     
     // Disable if it's the current plan or if subscription is not active
     return isActiveSubscription && 
@@ -641,11 +655,17 @@ export default function Home() {
                             const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
                             const isYearly = plan.duration === 'yearly';
                             const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
+                            const paymentMethod = userBilling.tierEntity?.billing?.paymentMethod;
                             
                             if (currentTier === newTier && 
                                 ((currentRenewal === 'MONTHLY' && !isYearly) || (currentRenewal === 'ANNUAL' && isYearly))) {
                               return "✓ Your current plan";
                             }
+                            
+                            if (paymentMethod === 'upi') {
+                              return " Plan change not supported for UPI";
+                            }
+                            
                             return "📋 Available plan change";
                           })()}
                         </div>
@@ -679,6 +699,8 @@ export default function Home() {
                           ? 'bg-gray-600 text-white'
                           : getButtonText(plan) === 'Change Plan'
                           ? 'bg-orange-600 text-white hover:bg-orange-700'
+                          : getButtonText(plan) === 'Not Supported'
+                          ? 'bg-gray-400 text-white cursor-not-allowed'
                           : 'bg-blue-600 text-white hover:bg-blue-700'
                       }`}
                     >
@@ -687,6 +709,27 @@ export default function Home() {
                   </div>
                 ))}
               </div>
+              
+              {/* UPI Plan Change Help Message */}
+              {userBilling?.hasSubscription && userBilling.tierEntity?.billing?.paymentMethod === 'upi' && (
+                <div className="mt-4 p-3 bg-orange-50 border border-orange-200 rounded-lg">
+                  <div className="flex items-start">
+                    <div className="flex-shrink-0">
+                      <svg className="h-5 w-5 text-orange-400 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    </div>
+                    <div className="ml-3">
+                      <h3 className="text-sm font-medium text-orange-800">
+                        Plan Change Not Available
+                      </h3>
+                      <p className="mt-1 text-sm text-orange-700">
+                        Plan changes are not supported for UPI payment method.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

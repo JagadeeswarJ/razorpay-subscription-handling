@@ -397,7 +397,7 @@ const handleSubscriptionCancelled = async (userId: string, subscription: any) =>
       isConfirmationSent: existingTier.billing?.isConfirmationSent,
       isCancelled: true,
       cancellationDate: currentTimestamp,
-      razorpaySubscriptionId: null, // Clear since it's cancelled
+      razorpaySubscriptionId: existingTier.billing?.razorpaySubscriptionId, // Keep for grace period
     };
 
     // Keep current tier until subscription end date

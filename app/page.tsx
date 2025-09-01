@@ -331,7 +331,7 @@ export default function Home() {
     const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
     const isYearly = plan.duration === 'yearly';
     const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
-    const paymentMethod = userBilling.tierEntity?.billing?.paymentMethod;
+    const paymentMethod = userBilling.tierEntity?.billing?.paymentMethod || 'upi'; // Default to UPI if not specified
     
     // Check if user has an active subscription based on hasSubscription flag and cancellation status
     const isActiveSubscription = Boolean(userBilling?.hasSubscription && 
@@ -363,7 +363,7 @@ export default function Home() {
     const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
     const isYearly = plan.duration === 'yearly';
     const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
-    const paymentMethod = userBilling.tierEntity?.billing?.paymentMethod;
+    const paymentMethod = userBilling.tierEntity?.billing?.paymentMethod || 'upi'; // Default to UPI if not specified
     
     // Check if user has an active subscription based on hasSubscription flag and cancellation status
     const isActiveSubscription = Boolean(userBilling?.hasSubscription && 
@@ -655,7 +655,7 @@ export default function Home() {
                             const newTier = plan.id.includes('basic') ? 'BASIC' : 'PRO';
                             const isYearly = plan.duration === 'yearly';
                             const currentRenewal = userBilling.tierEntity?.billing?.renewalPeriod;
-                            const paymentMethod = userBilling.tierEntity?.billing?.paymentMethod;
+                            const paymentMethod = userBilling.tierEntity?.billing?.paymentMethod || 'upi'; // Default to UPI if not specified
                             
                             if (currentTier === newTier && 
                                 ((currentRenewal === 'MONTHLY' && !isYearly) || (currentRenewal === 'ANNUAL' && isYearly))) {
@@ -711,7 +711,7 @@ export default function Home() {
               </div>
               
               {/* UPI Plan Change Help Message */}
-              {userBilling?.hasSubscription && userBilling.tierEntity?.billing?.paymentMethod === 'upi' && (
+              {userBilling?.hasSubscription && (userBilling.tierEntity?.billing?.paymentMethod || 'upi') === 'upi' && (
                 <div className="mt-4 p-3 bg-orange-50 border border-orange-200 rounded-lg">
                   <div className="flex items-start">
                     <div className="flex-shrink-0">

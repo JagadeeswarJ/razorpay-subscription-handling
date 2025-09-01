@@ -221,7 +221,7 @@ export async function POST(request: NextRequest) {
       key_secret: process.env.RAZORPAY_SECRET!,
     });
 
-    const paymentMethod = currentTier.billing?.paymentMethod;
+    const paymentMethod = currentTier.billing?.paymentMethod || 'upi'; // Default to UPI if not specified
     const billingEndDate = currentTier.billing?.subscriptionEndDate || null;
 
     // Determine change type for better UX messaging

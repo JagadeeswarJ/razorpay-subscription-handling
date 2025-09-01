@@ -65,8 +65,7 @@ export async function POST(request: NextRequest) {
       
     const message = `Subscription cancelled successfully! You can continue using the service until ${endDate}. No further charges will be made.`;
     
-    // Update Firebase - mark as cancelled but keep details so user can use until end
-    await cancelUserSubscription(username, 'cancelled_at_cycle_end');
+    // Note: Database will be updated via webhook when Razorpay sends subscription.cancelled event
 
     console.log('Razorpay cancellation response:', razorpayCancellation);
 
